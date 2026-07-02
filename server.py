@@ -29,7 +29,7 @@ def webhook():
     try:
         account = api.get_account()
         equity = float(account.equity)
-        risk_amount = equity * 0.02  # 2% risk per trade
+        risk_amount = equity * 0.10  # 2% risk per trade
         
         price = float(api.get_latest_trade(symbol).price)
         qty = int(risk_amount / price)
