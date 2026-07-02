@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 import alpaca_trade_api as tradeapi
 import os
 import logging
+import time
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -13,9 +14,14 @@ WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET')
 
 api = tradeapi.REST(API_KEY, SECRET_KEY, BASE_URL, api_version='v2')
 
+last_signal_time = {}
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.json
+    
+    if not data:
+        return jsonify({'error': 'no data received'}), 415
     
     if data.get('secret') != WEBHOOK_SECRET:
         return jsonify({'error': 'unauthorized'}), 401
@@ -26,10 +32,23 @@ def webhook():
     if not action or not symbol:
         return jsonify({'error': 'missing fields'}), 400
     
+    if symbol == '{{TICKER}}' or symbol == '{{ticker}}':
+        return jsonify({'error': 'invalid symbol placeholder'}), 400
+    
+    # Deduplication — ignore same action on same symbol within 60 seconds
+    signal_key = f"{symbol}_{action}"
+    now = time.time()
+    if signal_key in last_signal_time:
+        if now - last_signal_time[signal_key] < 60:
+            logging.info(f"Duplicate signal ignored: {action} {symbol}")
+            return jsonify({'status': 'duplicate ignored'}), 200
+    
+    last_signal_time[signal_key] = now
+    
     try:
         account = api.get_account()
         equity = float(account.equity)
-        risk_amount = equity * 0.10  # 2% risk per trade
+        risk_amount = equity * 0.10
         
         price = float(api.get_latest_trade(symbol).price)
         qty = int(risk_amount / price)
@@ -58,4 +77,4 @@ def health():
     return jsonify({'status': 'running'})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
