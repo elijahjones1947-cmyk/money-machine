@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
 import alpaca_trade_api as tradeapi
-import os, logging, time, json
+import os, logging, time
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +29,7 @@ LOGIN_HTML = '''<!DOCTYPE html>
 <title>Rent Generator</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',sans-serif}
+body{background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif}
 .logo{color:#00d64f;font-size:32px;font-weight:700;letter-spacing:-1px;margin-bottom:8px}
 .sub{color:#555;font-size:14px;margin-bottom:48px}
 .box{width:320px}
@@ -57,7 +57,7 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Display','Segoe UI',sans-serif;padding:24px;max-width:900px;margin:0 auto}
+body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;padding:24px;max-width:900px;margin:0 auto}
 .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:32px}
 .logo{color:#00d64f;font-size:22px;font-weight:700;letter-spacing:-0.5px}
 .status-pill{display:flex;align-items:center;gap:6px;background:#111;padding:8px 14px;border-radius:20px;font-size:13px}
@@ -69,8 +69,8 @@ body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'SF
 .balance-pnl{font-size:18px;margin-top:4px}
 .balance-pnl.up{color:#00d64f}
 .balance-pnl.down{color:#ff4444}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
 .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
+.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
 .card{background:#111;border-radius:20px;padding:20px}
 .card-label{color:#555;font-size:12px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
 .card-value{font-size:24px;font-weight:700}
@@ -79,8 +79,8 @@ body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'SF
 .card-value.white{color:#fff}
 .section-title{color:#555;font-size:12px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;margin-top:28px}
 .position-card{background:#111;border-radius:20px;padding:20px;margin-bottom:16px;border:1.5px solid #00d64f22}
-.position-empty{border-color:#222;color:#444;font-size:14px;padding:20px}
-.position-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.position-empty{border-color:#222;color:#444;font-size:14px}
+.position-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
 .pos-label{color:#555;font-size:13px}
 .pos-val{font-size:16px;font-weight:600}
 .chart-card{background:#111;border-radius:20px;padding:20px;margin-bottom:16px}
@@ -105,12 +105,6 @@ body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'SF
 input[type=range]{-webkit-appearance:none;width:120px;height:4px;background:#222;border-radius:2px;outline:none}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;background:#00d64f;border-radius:50%;cursor:pointer}
 .range-val{color:#00d64f;font-size:14px;font-weight:600;min-width:40px;text-align:right}
-.toggle{position:relative;width:48px;height:26px;cursor:pointer}
-.toggle input{opacity:0;width:0;height:0}
-.slider-toggle{position:absolute;top:0;left:0;right:0;bottom:0;background:#222;border-radius:13px;transition:.3s}
-.slider-toggle:before{content:'';position:absolute;width:20px;height:20px;left:3px;top:3px;background:#555;border-radius:50%;transition:.3s}
-input:checked+.slider-toggle{background:#00d64f22}
-input:checked+.slider-toggle:before{transform:translateX(22px);background:#00d64f}
 .kill-btn{background:#ff444420;color:#ff4444;border:1.5px solid #ff444440;padding:10px 20px;border-radius:12px;font-size:14px;font-weight:600;cursor:pointer;width:100%;margin-top:12px;transition:background .2s}
 .kill-btn:hover{background:#ff444440}
 .kill-btn.active{background:#00d64f20;color:#00d64f;border-color:#00d64f40}
@@ -132,7 +126,6 @@ input:checked+.slider-toggle:before{transform:translateX(22px);background:#00d64
 .sym-input:focus{border-color:#00d64f}
 .toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#00d64f;color:#000;padding:12px 24px;border-radius:14px;font-weight:700;font-size:14px;opacity:0;transition:opacity .3s;z-index:999}
 .empty{color:#444;font-size:14px;padding:12px 0;text-align:center}
-.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
 </style>
 </head>
 <body>
@@ -189,18 +182,10 @@ input:checked+.slider-toggle:before{transform:translateX(22px);background:#00d64
 <div class="section-title">Current position</div>
 {% if position %}
 <div class="position-card">
-  <div class="position-row">
-    <span class="pos-label">Symbol</span><span class="pos-val" style="color:#00d64f">{{ position.symbol }}</span>
-  </div>
-  <div class="position-row">
-    <span class="pos-label">Shares</span><span class="pos-val">{{ position.qty }}</span>
-  </div>
-  <div class="position-row">
-    <span class="pos-label">Avg entry</span><span class="pos-val">${{ position.avg_entry }}</span>
-  </div>
-  <div class="position-row">
-    <span class="pos-label">Current price</span><span class="pos-val">${{ position.current_price }}</span>
-  </div>
+  <div class="position-row"><span class="pos-label">Symbol</span><span class="pos-val" style="color:#00d64f">{{ position.symbol }}</span></div>
+  <div class="position-row"><span class="pos-label">Shares</span><span class="pos-val">{{ position.qty }}</span></div>
+  <div class="position-row"><span class="pos-label">Avg entry</span><span class="pos-val">${{ position.avg_entry }}</span></div>
+  <div class="position-row"><span class="pos-label">Current price</span><span class="pos-val">${{ position.current_price }}</span></div>
   <div class="position-row">
     <span class="pos-label">Unrealized P&L</span>
     <span class="pos-val" style="color:{{ '#00d64f' if position.unrealized_pl >= 0 else '#ff4444' }}">${{ position.unrealized_pl }}</span>
@@ -220,7 +205,7 @@ input:checked+.slider-toggle:before{transform:translateX(22px);background:#00d64
   {% for sym in watched_symbols %}
   <div class="watch-row">
     <span class="watch-sym">{{ sym }}</span>
-    <span class="watch-price" id="price-{{ sym }}">Loading...</span>
+    <span class="watch-price" id="price-{{ sym }}">—</span>
   </div>
   {% endfor %}
   {% if not watched_symbols %}
@@ -256,7 +241,7 @@ input:checked+.slider-toggle:before{transform:translateX(22px);background:#00d64
   <div class="control-row">
     <div>
       <div class="control-label">Max trades per day</div>
-      <div class="control-sub">Bot stops after this</div>
+      <div class="control-sub">Bot stops after this many</div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
       <input type="range" min="1" max="50" value="{{ max_trades_per_day }}" id="maxTradesSlider" oninput="updateMaxTrades(this.value)">
@@ -290,9 +275,9 @@ input:checked+.slider-toggle:before{transform:translateX(22px);background:#00d64
           <div class="trade-detail">{{ trade.qty }} shares @ ${{ trade.price }} · {{ trade.time }}</div>
         </div>
       </div>
-      <div class="trade-pnl {{ 'gain' if trade.pnl and trade.pnl > 0 else 'loss' if trade.pnl and trade.pnl < 0 else 'neutral' }}">
+      <div class="trade-pnl {% if trade.pnl is not none %}{% if trade.pnl > 0 %}gain{% elif trade.pnl < 0 %}loss{% else %}neutral{% endif %}{% else %}neutral{% endif %}">
         {% if trade.pnl is not none %}
-          {{ '+$' + '%.2f'|format(trade.pnl) if trade.pnl > 0 else '-$' + '%.2f'|format(trade.pnl|abs) }}
+          {% if trade.pnl > 0 %}+${{ "%.2f" % trade.pnl }}{% elif trade.pnl < 0 %}-${{ "%.2f" % (trade.pnl * -1) }}{% else %}$0.00{% endif %}
         {% else %}—{% endif %}
       </div>
     </div>
@@ -305,36 +290,27 @@ input:checked+.slider-toggle:before{transform:translateX(22px);background:#00d64
 <div id="toast" class="toast"></div>
 
 <script>
-const labels = {{ equity_history.times | tojson }};
-const data = {{ equity_history.values | tojson }};
+const labels = {{ eq_times|tojson }};
+const data = {{ eq_values|tojson }};
 
 if(data.length > 1){
   new Chart(document.getElementById('equityChart'), {
     type:'line',
-    data:{
-      labels:labels,
-      datasets:[{label:'Equity',data:data,borderColor:'#00d64f',backgroundColor:'rgba(0,214,79,0.05)',borderWidth:2,pointRadius:2,tension:0.4,fill:true}]
-    },
-    options:{
-      responsive:true,
-      plugins:{legend:{display:false}},
-      scales:{
-        x:{ticks:{color:'#444',font:{size:11}},grid:{color:'#1a1a1a'}},
-        y:{ticks:{color:'#444',font:{size:11},callback:v=>'$'+v.toFixed(0)},grid:{color:'#1a1a1a'}}
-      }
-    }
+    data:{labels:labels,datasets:[{label:'Equity',data:data,borderColor:'#00d64f',backgroundColor:'rgba(0,214,79,0.05)',borderWidth:2,pointRadius:2,tension:0.4,fill:true}]},
+    options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#444',font:{size:11}},grid:{color:'#1a1a1a'}},y:{ticks:{color:'#444',font:{size:11},callback:v=>'$'+v.toFixed(0)},grid:{color:'#1a1a1a'}}}}
   });
 } else {
   document.getElementById('equityChart').parentElement.innerHTML = '<div class="empty" style="padding:20px">Chart builds as trades come in</div>';
 }
 
-function showToast(msg, color='#00d64f'){
+function showToast(msg, color){
+  color = color || '#00d64f';
   const t = document.getElementById('toast');
   t.textContent = msg;
   t.style.background = color;
   t.style.color = color === '#00d64f' ? '#000' : '#fff';
   t.style.opacity = '1';
-  setTimeout(()=>t.style.opacity='0', 3000);
+  setTimeout(function(){t.style.opacity='0';}, 3000);
 }
 
 function updateRisk(v){
@@ -353,9 +329,9 @@ function updateLossLimit(v){
 }
 
 function toggleBot(){
-  fetch('/toggle_bot',{method:'POST'}).then(r=>r.json()).then(d=>{
+  fetch('/toggle_bot',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
     showToast(d.enabled ? 'Bot resumed' : 'Bot paused', d.enabled ? '#00d64f' : '#ff4444');
-    setTimeout(()=>location.reload(), 1000);
+    setTimeout(function(){location.reload();}, 1000);
   });
 }
 
@@ -363,26 +339,26 @@ function addSymbol(){
   const sym = document.getElementById('newSym').value.toUpperCase().trim();
   if(!sym) return;
   fetch('/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})})
-    .then(r=>r.json()).then(d=>{
+    .then(function(r){return r.json();}).then(function(d){
       showToast(d.status === 'added' ? sym+' added' : 'Already in watchlist');
-      setTimeout(()=>location.reload(), 1000);
+      setTimeout(function(){location.reload();}, 1000);
     });
 }
 
 function manualTrade(action){
   const sym = document.getElementById('manualSym').value.toUpperCase().trim();
   if(!sym){showToast('Enter a symbol first','#ff4444');return;}
-  if(!confirm('Place manual '+action.toUpperCase()+' order for '+sym+'?')) return;
+  if(!confirm('Place manual '+action.toUpperCase()+' for '+sym+'?')) return;
   fetch('/webhook',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({secret:'{{ webhook_secret }}',action:action,symbol:sym,manual:true})})
-    .then(r=>r.json()).then(d=>{
+    body:JSON.stringify({secret:'{{ ws }}',action:action,symbol:sym,manual:true})})
+    .then(function(r){return r.json();}).then(function(d){
       if(d.status === 'order placed') showToast(action.toUpperCase()+' '+d.qty+' '+sym);
       else showToast(d.error || 'Error','#ff4444');
-      setTimeout(()=>location.reload(), 2000);
+      setTimeout(function(){location.reload();}, 2000);
     });
 }
 
-setTimeout(()=>location.reload(), 30000);
+setTimeout(function(){location.reload();}, 30000);
 </script>
 </body></html>'''
 
@@ -401,7 +377,6 @@ def index():
 
 @app.route('/dashboard')
 def dashboard():
-    global trades_today
     if not session.get('auth'):
         return redirect(url_for('login'))
     try:
@@ -420,9 +395,9 @@ def dashboard():
                 equity_history['values'].pop(0)
 
         account_data = {
-            'equity': f"{equity:,.2f}",
-            'buying_power': f"{buying_power:,.2f}",
-            'pnl': f"{abs(pnl_raw):,.2f}",
+            'equity': '{:,.2f}'.format(equity),
+            'buying_power': '{:,.2f}'.format(buying_power),
+            'pnl': '{:,.2f}'.format(abs(pnl_raw)),
             'pnl_raw': pnl_raw
         }
 
@@ -435,8 +410,8 @@ def dashboard():
                 position = {
                     'symbol': p.symbol,
                     'qty': p.qty,
-                    'avg_entry': f"{float(p.avg_entry_price):.2f}",
-                    'current_price': f"{float(p.current_price):.2f}",
+                    'avg_entry': '{:.2f}'.format(float(p.avg_entry_price)),
+                    'current_price': '{:.2f}'.format(float(p.current_price)),
                     'unrealized_pl': round(upl, 2)
                 }
         except:
@@ -445,28 +420,29 @@ def dashboard():
         completed = [t for t in trade_log if t.get('pnl') is not None]
         wins = [t for t in completed if t['pnl'] > 0]
         losses = [t for t in completed if t['pnl'] < 0]
-        win_rate = round(len(wins)/len(completed)*100) if completed else 0
-        avg_gain = round(sum(t['pnl'] for t in wins)/len(wins), 2) if wins else 0
-        avg_loss = round(abs(sum(t['pnl'] for t in losses)/len(losses)), 2) if losses else 0
-        best_trade = round(max((t['pnl'] for t in wins), default=0), 2)
-        worst_trade = round(abs(min((t['pnl'] for t in losses), default=0)), 2)
+        win_rate = round(len(wins) / len(completed) * 100) if completed else 0
+        avg_gain = round(sum(t['pnl'] for t in wins) / len(wins), 2) if wins else 0
+        avg_loss = round(abs(sum(t['pnl'] for t in losses) / len(losses)), 2) if losses else 0
+        best_trade = round(max([t['pnl'] for t in wins] or [0]), 2)
+        worst_trade = round(abs(min([t['pnl'] for t in losses] or [0])), 2)
 
         return render_template_string(DASHBOARD_HTML,
             account=account_data, position=position, trades=trade_log,
-            equity_history=equity_history, watched_symbols=watched_symbols,
-            bot_enabled=bot_enabled, risk_percent=risk_percent,
-            max_trades_per_day=max_trades_per_day, daily_loss_limit=daily_loss_limit,
-            trades_today=trades_today, win_rate=win_rate, avg_gain=avg_gain,
-            avg_loss=avg_loss, best_trade=best_trade, worst_trade=worst_trade,
-            webhook_secret=WEBHOOK_SECRET)
+            eq_times=equity_history['times'], eq_values=equity_history['values'],
+            watched_symbols=watched_symbols, bot_enabled=bot_enabled,
+            risk_percent=risk_percent, max_trades_per_day=max_trades_per_day,
+            daily_loss_limit=daily_loss_limit, trades_today=trades_today,
+            win_rate=win_rate, avg_gain=avg_gain, avg_loss=avg_loss,
+            best_trade=best_trade, worst_trade=worst_trade, ws=WEBHOOK_SECRET)
     except Exception as e:
-        return f"Error: {e}", 500
+        logging.error('Dashboard error: {}'.format(e))
+        return 'Error: {}'.format(e), 500
 
 @app.route('/toggle_bot', methods=['POST'])
 def toggle_bot():
     global bot_enabled
     if not session.get('auth'):
-        return jsonify({'error':'unauthorized'}), 401
+        return jsonify({'error': 'unauthorized'}), 401
     bot_enabled = not bot_enabled
     return jsonify({'enabled': bot_enabled})
 
@@ -474,92 +450,100 @@ def toggle_bot():
 def settings():
     global risk_percent, max_trades_per_day, daily_loss_limit
     if not session.get('auth'):
-        return jsonify({'error':'unauthorized'}), 401
+        return jsonify({'error': 'unauthorized'}), 401
     data = request.json
     if 'risk_percent' in data:
-        risk_percent = data['risk_percent']
+        risk_percent = int(data['risk_percent'])
     if 'max_trades_per_day' in data:
-        max_trades_per_day = data['max_trades_per_day']
+        max_trades_per_day = int(data['max_trades_per_day'])
     if 'daily_loss_limit' in data:
-        daily_loss_limit = data['daily_loss_limit']
-    return jsonify({'status':'updated'})
+        daily_loss_limit = int(data['daily_loss_limit'])
+    return jsonify({'status': 'updated'})
 
 @app.route('/watchlist', methods=['POST'])
 def add_watchlist():
     if not session.get('auth'):
-        return jsonify({'error':'unauthorized'}), 401
-    sym = request.json.get('symbol','').upper()
+        return jsonify({'error': 'unauthorized'}), 401
+    sym = request.json.get('symbol', '').upper()
     if sym and sym not in watched_symbols:
         watched_symbols.append(sym)
-        return jsonify({'status':'added'})
-    return jsonify({'status':'exists'})
+        return jsonify({'status': 'added'})
+    return jsonify({'status': 'exists'})
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     global trades_today
     data = request.json
     if not data:
-        return jsonify({'error':'no data'}), 415
+        return jsonify({'error': 'no data'}), 415
     if data.get('secret') != WEBHOOK_SECRET:
-        return jsonify({'error':'unauthorized'}), 401
+        return jsonify({'error': 'unauthorized'}), 401
 
     action = data.get('action')
     symbol = data.get('symbol')
     if not action or not symbol:
-        return jsonify({'error':'missing fields'}), 400
-    if symbol in ('{{TICKER}}','{{ticker}}'):
-        return jsonify({'error':'invalid symbol'}), 400
+        return jsonify({'error': 'missing fields'}), 400
+    if symbol in ('{{TICKER}}', '{{ticker}}'):
+        return jsonify({'error': 'invalid symbol'}), 400
 
-    if not bot_enabled and not data.get('manual'):
-        return jsonify({'error':'bot paused'}), 400
+    is_manual = data.get('manual', False)
 
-    if trades_today >= max_trades_per_day and not data.get('manual'):
-        return jsonify({'error':'max trades reached'}), 400
+    if not bot_enabled and not is_manual:
+        return jsonify({'error': 'bot paused'}), 400
+    if trades_today >= max_trades_per_day and not is_manual:
+        return jsonify({'error': 'max trades reached'}), 400
 
     daily_pnl = sum(t['pnl'] for t in trade_log if t.get('pnl') is not None)
-    if daily_pnl <= -daily_loss_limit and not data.get('manual'):
-        return jsonify({'error':'daily loss limit hit'}), 400
+    if daily_pnl <= -daily_loss_limit and not is_manual:
+        return jsonify({'error': 'daily loss limit hit'}), 400
 
-    signal_key = f"{symbol}_{action}"
+    signal_key = '{0}_{1}'.format(symbol, action)
     now = time.time()
-    if not data.get('manual'):
+    if not is_manual:
         if signal_key in last_signal_time:
             if now - last_signal_time[signal_key] < 60:
-                return jsonify({'status':'duplicate ignored'}), 200
+                return jsonify({'status': 'duplicate ignored'}), 200
     last_signal_time[signal_key] = now
 
     try:
         acct = api.get_account()
         equity = float(acct.equity)
-        risk_amount = equity * (risk_percent / 100)
+        risk_amount = equity * (risk_percent / 100.0)
         price = float(api.get_latest_trade(symbol).price)
         qty = int(risk_amount / price)
         if qty < 1:
-            return jsonify({'error':'position too small'}), 400
+            return jsonify({'error': 'position too small'}), 400
 
         pnl = None
         if action == 'sell':
-            last_buy = next((t for t in reversed(trade_log) if t['action']=='buy' and t['symbol']==symbol), None)
+            last_buy = next((t for t in reversed(trade_log) if t['action'] == 'buy' and t['symbol'] == symbol), None)
             if last_buy:
                 pnl = round((price - float(last_buy['price'])) * qty, 2)
 
         if action == 'buy':
             api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='day')
-            logging.info(f"BUY {qty} shares of {symbol}")
+            logging.info('BUY {} shares of {}'.format(qty, symbol))
         elif action == 'sell':
             api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='day')
-            logging.info(f"SELL {qty} shares of {symbol}")
+            logging.info('SELL {} shares of {}'.format(qty, symbol))
 
         trades_today += 1
-        trade_log.append({'time':time.strftime('%H:%M:%S'),'action':action,'symbol':symbol,'qty':qty,'price':f"{price:.2f}",'pnl':pnl})
-        return jsonify({'status':'order placed','qty':qty,'symbol':symbol})
+        trade_log.append({
+            'time': time.strftime('%H:%M:%S'),
+            'action': action,
+            'symbol': symbol,
+            'qty': qty,
+            'price': '{:.2f}'.format(price),
+            'pnl': pnl
+        })
+        return jsonify({'status': 'order placed', 'qty': qty, 'symbol': symbol})
     except Exception as e:
-        logging.error(f"Error: {e}")
-        return jsonify({'error':str(e)}), 500
+        logging.error('Error: {}'.format(e))
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status':'running'})
+    return jsonify({'status': 'running'})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
