@@ -5,12 +5,18 @@ import os, logging, time
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
-API_KEY = os.environ.get('ALPACA_API_KEY')
-SECRET_KEY = os.environ.get('ALPACA_SECRET_KEY')
-BASE_URL = os.environ.get('ALPACA_BASE_URL')
-WEBHOOK_SECRET = os.environ.get('WEBHOOK_SECRET')
-DASHBOARD_PASSWORD = os.environ.get('DASHBOARD_PASSWORD', 'Rentmachine123')
-app.secret_key = os.environ.get('FLASK_SECRET', 'rentgenerator_secret_2024')
+def require_env(key):
+    value = os.environ.get(key)
+    if not value:
+        raise RuntimeError('Missing required environment variable: {}'.format(key))
+    return value
+
+API_KEY = require_env('ALPACA_API_KEY')
+SECRET_KEY = require_env('ALPACA_SECRET_KEY')
+BASE_URL = require_env('ALPACA_BASE_URL')
+WEBHOOK_SECRET = require_env('WEBHOOK_SECRET')
+DASHBOARD_PASSWORD = require_env('DASHBOARD_PASSWORD')
+app.secret_key = require_env('FLASK_SECRET')
 
 api = tradeapi.REST(API_KEY, SECRET_KEY, BASE_URL, api_version='v2')
 
