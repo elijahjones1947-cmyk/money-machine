@@ -3,13 +3,16 @@ import os
 
 def require_env(key):
     value = os.environ.get(key)
-    if not value:
+    if not value or not value.strip():
         raise RuntimeError("Missing required environment variable: {}".format(key))
-    return value
+    return value.strip()
 
 
 def optional_env(key, default=None):
-    return os.environ.get(key, default)
+    value = os.environ.get(key)
+    if value is None:
+        return default
+    return value.strip()
 
 
 # "paper" or "live" — controls BOTH Alpaca and OANDA at once.
