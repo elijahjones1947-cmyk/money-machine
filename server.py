@@ -1,34 +1,77 @@
 from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
-import alpaca_trade_api as tradeapi
-import os, logging, time
+import logging, time, datetime
+
+import config
+import state
+from errors import InsufficientFundsError, MarketClosedError, InvalidSymbolError, BrokerConnectionError
+from brokers.alpaca_broker import AlpacaBroker
+from brokers.oanda_broker import OandaBroker
+from risk.risk_manager import RiskManager
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
+app.secret_key = config.FLASK_SECRET
 
-def require_env(key):
-    value = os.environ.get(key)
-    if not value:
-        raise RuntimeError('Missing required environment variable: {}'.format(key))
-    return value
+WEBHOOK_SECRET = config.WEBHOOK_SECRET
+DASHBOARD_PASSWORD = config.DASHBOARD_PASSWORD
 
-API_KEY = require_env('ALPACA_API_KEY')
-SECRET_KEY = require_env('ALPACA_SECRET_KEY')
-BASE_URL = require_env('ALPACA_BASE_URL')
-WEBHOOK_SECRET = require_env('WEBHOOK_SECRET')
-DASHBOARD_PASSWORD = require_env('DASHBOARD_PASSWORD')
-app.secret_key = require_env('FLASK_SECRET')
+# --- Broker + risk manager setup ---------------------------------------
+alpaca_creds = config.get_broker_credentials("alpaca")
+alpaca_broker = AlpacaBroker(
+    api_key=alpaca_creds["api_key"],
+    secret_key=alpaca_creds["api_secret"],
+    base_url=alpaca_creds["base_url"],
+)
 
-api = tradeapi.REST(API_KEY, SECRET_KEY, BASE_URL, api_version='v2')
+oanda_creds = config.get_broker_credentials("oanda")
+oanda_broker = OandaBroker(
+    api_key=oanda_creds["api_key"],
+    account_id=oanda_creds["account_id"],
+    base_url=oanda_creds["base_url"],
+)
 
-last_signal_time = {}
-trade_log = []
-equity_history = {'times': [], 'values': []}
-watched_symbols = ['AAPL']
-bot_enabled = True
-max_trades_per_day = 20
-daily_loss_limit = 500
-risk_percent = 10
-trades_today = 0
+BROKERS = {"stock": alpaca_broker, "forex": oanda_broker}
+
+risk_manager = RiskManager(config.get_risk_config())
+
+
+def asset_class_for_symbol(symbol):
+    """Forex pairs use OANDA's underscore format, e.g. EUR_USD. Anything
+    else (AAPL, TSLA, ...) is treated as a stock/Alpaca symbol."""
+    return "forex" if "_" in symbol else "stock"
+
+
+def get_combined_equity():
+    """Best-effort combined equity across both brokers. If one broker's
+    API call fails, fall back to just the other so a single outage
+    doesn't take down the whole risk check."""
+    total = 0.0
+    got_any = False
+    for broker in BROKERS.values():
+        try:
+            total += broker.get_account_info()["equity"]
+            got_any = True
+        except BrokerConnectionError as e:
+            logging.warning("Could not fetch equity from a broker: {}".format(e))
+    if not got_any:
+        raise BrokerConnectionError("Could not reach either broker to compute combined equity")
+    return total
+
+
+def check_daily_rollover():
+    """Reset daily counters (trades_today, risk_manager's daily P&L)
+    the first time a request comes in on a new day."""
+    today = datetime.date.today().isoformat()
+    if state.current_day != today:
+        state.current_day = today
+        state.trades_today = {"stock": 0, "forex": 0}
+        try:
+            risk_manager.reset_daily(get_combined_equity())
+        except BrokerConnectionError:
+            risk_manager.reset_daily(None)
+
+
+# --- HTML templates -------------------------------------------------------
 
 LOGIN_HTML = '''<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -66,15 +109,22 @@ DASHBOARD_HTML = '''<!DOCTYPE html>
 body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;padding:24px;max-width:900px;margin:0 auto}
 .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:32px}
 .logo{color:#00d64f;font-size:22px;font-weight:700;letter-spacing:-0.5px}
+.mode-pill{display:inline-block;background:#222;color:#aaa;font-size:11px;padding:3px 8px;border-radius:10px;margin-left:8px;vertical-align:middle;text-transform:uppercase}
+.mode-pill.live{background:#ff444422;color:#ff4444}
 .status-pill{display:flex;align-items:center;gap:6px;background:#111;padding:8px 14px;border-radius:20px;font-size:13px}
 .dot{width:8px;height:8px;border-radius:50%;background:#00d64f}
 .dot.off{background:#ff4444}
-.balance-section{text-align:center;margin-bottom:36px}
+.balance-section{text-align:center;margin-bottom:20px}
 .balance-label{color:#555;font-size:14px;margin-bottom:6px}
 .balance-amount{font-size:52px;font-weight:700;letter-spacing:-2px;color:#fff}
 .balance-pnl{font-size:18px;margin-top:4px}
 .balance-pnl.up{color:#00d64f}
 .balance-pnl.down{color:#ff4444}
+.asset-split{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px}
+.asset-card{background:#111;border-radius:16px;padding:16px;text-align:center}
+.asset-card .name{color:#555;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.asset-card .val{font-size:20px;font-weight:700}
+.asset-card .halted{color:#ff4444;font-size:11px;margin-top:4px;font-weight:600}
 .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
 .stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
 .card{background:#111;border-radius:20px;padding:20px}
@@ -97,6 +147,7 @@ body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF
 .badge{padding:4px 10px;border-radius:20px;font-size:11px;font-weight:700;text-transform:uppercase}
 .badge.buy{background:#00d64f22;color:#00d64f}
 .badge.sell{background:#ff444422;color:#ff4444}
+.asset-badge{padding:3px 8px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase;background:#2a2a2a;color:#999}
 .trade-sym{font-size:15px;font-weight:600}
 .trade-detail{color:#555;font-size:12px;margin-top:2px}
 .trade-pnl{font-size:15px;font-weight:700}
@@ -136,7 +187,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 </head>
 <body>
 <div class="header">
-  <div class="logo">Rent Generator</div>
+  <div class="logo">Rent Generator <span class="mode-pill {{ 'live' if trading_mode == 'live' else '' }}">{{ trading_mode }}</span></div>
   <div class="status-pill">
     <div class="dot {{ '' if bot_enabled else 'off' }}"></div>
     <span>{{ 'Bot running' if bot_enabled else 'Bot paused' }}</span>
@@ -144,25 +195,41 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 </div>
 
 <div class="balance-section">
-  <div class="balance-label">Portfolio value</div>
-  <div class="balance-amount">${{ account.equity }}</div>
-  <div class="balance-pnl {{ 'up' if account.pnl_raw >= 0 else 'down' }}">
-    {{ '+' if account.pnl_raw >= 0 else '' }}${{ account.pnl }} today
+  <div class="balance-label">Combined portfolio value</div>
+  <div class="balance-amount">${{ combined_equity }}</div>
+</div>
+
+<div class="asset-split">
+  <div class="asset-card">
+    <div class="name">Stocks (Alpaca)</div>
+    <div class="val">${{ stock_account.equity }}</div>
+    {% if stock_halted %}<div class="halted">⛔ halted today</div>{% endif %}
+  </div>
+  <div class="asset-card">
+    <div class="name">Forex (OANDA)</div>
+    <div class="val">${{ forex_account.equity }}</div>
+    {% if forex_halted %}<div class="halted">⛔ halted today</div>{% endif %}
   </div>
 </div>
 
+{% if account_halted %}
+<div class="card" style="border:1.5px solid #ff444460;margin-bottom:16px;text-align:center;color:#ff4444;font-weight:700">
+  🚨 ACCOUNT-WIDE HALT ACTIVE — all trading stopped for today
+</div>
+{% endif %}
+
 <div class="grid3">
   <div class="card">
-    <div class="card-label">Buying power</div>
-    <div class="card-value white">${{ account.buying_power }}</div>
-  </div>
-  <div class="card">
     <div class="card-label">Trades today</div>
-    <div class="card-value white">{{ trades_today }}</div>
+    <div class="card-value white">{{ trades_today.stock + trades_today.forex }}</div>
   </div>
   <div class="card">
     <div class="card-label">Win rate</div>
     <div class="card-value {{ 'green' if win_rate >= 50 else 'red' }}">{{ win_rate }}%</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Open positions</div>
+    <div class="card-value white">{{ positions|length }}</div>
   </div>
 </div>
 
@@ -185,47 +252,56 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   </div>
 </div>
 
-<div class="section-title">Current position</div>
-{% if position %}
-<div class="position-card">
-  <div class="position-row"><span class="pos-label">Symbol</span><span class="pos-val" style="color:#00d64f">{{ position.symbol }}</span></div>
-  <div class="position-row"><span class="pos-label">Shares</span><span class="pos-val">{{ position.qty }}</span></div>
-  <div class="position-row"><span class="pos-label">Avg entry</span><span class="pos-val">${{ position.avg_entry }}</span></div>
-  <div class="position-row"><span class="pos-label">Current price</span><span class="pos-val">${{ position.current_price }}</span></div>
-  <div class="position-row">
-    <span class="pos-label">Unrealized P&L</span>
-    <span class="pos-val" style="color:{{ '#00d64f' if position.unrealized_pl >= 0 else '#ff4444' }}">${{ position.unrealized_pl }}</span>
+<div class="section-title">Open positions</div>
+{% if positions %}
+  {% for position in positions %}
+  <div class="position-card">
+    <div class="position-row"><span class="pos-label">Symbol</span><span class="pos-val" style="color:#00d64f">{{ position.symbol }} <span class="asset-badge">{{ position.asset_class }}</span></span></div>
+    <div class="position-row"><span class="pos-label">Size</span><span class="pos-val">{{ position.qty }}</span></div>
+    <div class="position-row"><span class="pos-label">Avg entry</span><span class="pos-val">${{ position.avg_entry }}</span></div>
+    <div class="position-row"><span class="pos-label">Current price</span><span class="pos-val">${{ position.current_price }}</span></div>
+    <div class="position-row">
+      <span class="pos-label">Unrealized P&L</span>
+      <span class="pos-val" style="color:{{ '#00d64f' if position.unrealized_pl >= 0 else '#ff4444' }}">${{ position.unrealized_pl }}</span>
+    </div>
   </div>
-</div>
+  {% endfor %}
 {% else %}
-<div class="position-card position-empty">No open position</div>
+<div class="position-card position-empty">No open positions</div>
 {% endif %}
 
-<div class="section-title">Equity curve</div>
+<div class="section-title">Equity curve (combined)</div>
 <div class="chart-card">
   <canvas id="equityChart" height="80"></canvas>
 </div>
 
-<div class="section-title">Watchlist</div>
+<div class="section-title">Watchlist — stocks</div>
 <div class="watchlist">
-  {% for sym in watched_symbols %}
-  <div class="watch-row">
-    <span class="watch-sym">{{ sym }}</span>
-    <span class="watch-price" id="price-{{ sym }}">—</span>
-  </div>
+  {% for sym in watched_symbols.stock %}
+  <div class="watch-row"><span class="watch-sym">{{ sym }}</span><span class="watch-price" id="price-{{ sym }}">—</span></div>
   {% endfor %}
-  {% if not watched_symbols %}
-  <div class="empty">No symbols added</div>
-  {% endif %}
+  {% if not watched_symbols.stock %}<div class="empty">No symbols added</div>{% endif %}
   <div class="add-sym">
-    <input type="text" id="newSym" placeholder="Add symbol (e.g. TSLA)" maxlength="5">
-    <button onclick="addSymbol()">Add</button>
+    <input type="text" id="newStockSym" placeholder="Add stock symbol (e.g. TSLA)" maxlength="8">
+    <button onclick="addSymbol('stock')">Add</button>
+  </div>
+</div>
+
+<div class="section-title">Watchlist — forex</div>
+<div class="watchlist">
+  {% for sym in watched_symbols.forex %}
+  <div class="watch-row"><span class="watch-sym">{{ sym }}</span><span class="watch-price" id="price-{{ sym }}">—</span></div>
+  {% endfor %}
+  {% if not watched_symbols.forex %}<div class="empty">No symbols added</div>{% endif %}
+  <div class="add-sym">
+    <input type="text" id="newForexSym" placeholder="Add forex pair (e.g. GBP_USD)" maxlength="8">
+    <button onclick="addSymbol('forex')">Add</button>
   </div>
 </div>
 
 <div class="section-title">Manual trade</div>
 <div class="card">
-  <input type="text" class="sym-input" id="manualSym" placeholder="Symbol (e.g. AAPL)">
+  <input type="text" class="sym-input" id="manualSym" placeholder="Symbol (e.g. AAPL or EUR_USD)">
   <div class="manual-btns">
     <button class="buy-btn" onclick="manualTrade('buy')">Buy</button>
     <button class="sell-btn" onclick="manualTrade('sell')">Sell</button>
@@ -236,32 +312,40 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 <div class="controls">
   <div class="control-row">
     <div>
-      <div class="control-label">Risk per trade</div>
-      <div class="control-sub">% of account per signal</div>
+      <div class="control-label">Stock risk per trade</div>
+      <div class="control-sub">% of combined equity per signal</div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
-      <input type="range" min="1" max="50" value="{{ risk_percent }}" id="riskSlider" oninput="updateRisk(this.value)">
-      <span class="range-val" id="riskVal">{{ risk_percent }}%</span>
+      <input type="range" min="1" max="50" value="{{ risk_percent.stock }}" id="stockRiskSlider" oninput="updateRisk('stock', this.value)">
+      <span class="range-val" id="stockRiskVal">{{ risk_percent.stock }}%</span>
     </div>
   </div>
   <div class="control-row">
     <div>
-      <div class="control-label">Max trades per day</div>
-      <div class="control-sub">Bot stops after this many</div>
+      <div class="control-label">Forex risk per trade</div>
+      <div class="control-sub">% of combined equity per signal</div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
-      <input type="range" min="1" max="50" value="{{ max_trades_per_day }}" id="maxTradesSlider" oninput="updateMaxTrades(this.value)">
-      <span class="range-val" id="maxTradesVal">{{ max_trades_per_day }}</span>
+      <input type="range" min="1" max="50" value="{{ risk_percent.forex }}" id="forexRiskSlider" oninput="updateRisk('forex', this.value)">
+      <span class="range-val" id="forexRiskVal">{{ risk_percent.forex }}%</span>
     </div>
   </div>
   <div class="control-row">
     <div>
-      <div class="control-label">Daily loss limit</div>
-      <div class="control-sub">Bot stops if exceeded</div>
+      <div class="control-label">Max stock trades/day</div>
     </div>
     <div style="display:flex;align-items:center;gap:10px">
-      <input type="range" min="50" max="2000" step="50" value="{{ daily_loss_limit }}" id="lossSlider" oninput="updateLossLimit(this.value)">
-      <span class="range-val" id="lossVal">${{ daily_loss_limit }}</span>
+      <input type="range" min="1" max="50" value="{{ max_trades_per_day.stock }}" id="stockMaxSlider" oninput="updateMaxTrades('stock', this.value)">
+      <span class="range-val" id="stockMaxVal">{{ max_trades_per_day.stock }}</span>
+    </div>
+  </div>
+  <div class="control-row">
+    <div>
+      <div class="control-label">Max forex trades/day</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <input type="range" min="1" max="50" value="{{ max_trades_per_day.forex }}" id="forexMaxSlider" oninput="updateMaxTrades('forex', this.value)">
+      <span class="range-val" id="forexMaxVal">{{ max_trades_per_day.forex }}</span>
     </div>
   </div>
   <button class="kill-btn {{ 'active' if not bot_enabled else '' }}" onclick="toggleBot()">
@@ -277,8 +361,8 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       <div class="trade-left">
         <span class="badge {{ trade.action }}">{{ trade.action }}</span>
         <div>
-          <div class="trade-sym">{{ trade.symbol }}</div>
-          <div class="trade-detail">{{ trade.qty }} shares @ ${{ trade.price }} · {{ trade.time }}</div>
+          <div class="trade-sym">{{ trade.symbol }} <span class="asset-badge">{{ trade.asset_class }}</span></div>
+          <div class="trade-detail">{{ trade.qty }} @ ${{ trade.price }} · {{ trade.time }}</div>
         </div>
       </div>
       <div class="trade-pnl {% if trade.pnl is not none %}{% if trade.pnl > 0 %}gain{% elif trade.pnl < 0 %}loss{% else %}neutral{% endif %}{% else %}neutral{% endif %}">
@@ -319,19 +403,14 @@ function showToast(msg, color){
   setTimeout(function(){t.style.opacity='0';}, 3000);
 }
 
-function updateRisk(v){
-  document.getElementById('riskVal').textContent = v+'%';
-  fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({risk_percent:parseInt(v)})});
+function updateRisk(assetClass, v){
+  document.getElementById(assetClass+'RiskVal').textContent = v+'%';
+  fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_class:assetClass, risk_percent:parseInt(v)})});
 }
 
-function updateMaxTrades(v){
-  document.getElementById('maxTradesVal').textContent = v;
-  fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({max_trades_per_day:parseInt(v)})});
-}
-
-function updateLossLimit(v){
-  document.getElementById('lossVal').textContent = '$'+v;
-  fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({daily_loss_limit:parseInt(v)})});
+function updateMaxTrades(assetClass, v){
+  document.getElementById(assetClass+'MaxVal').textContent = v;
+  fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_class:assetClass, max_trades_per_day:parseInt(v)})});
 }
 
 function toggleBot(){
@@ -341,10 +420,11 @@ function toggleBot(){
   });
 }
 
-function addSymbol(){
-  const sym = document.getElementById('newSym').value.toUpperCase().trim();
+function addSymbol(assetClass){
+  const inputId = assetClass === 'stock' ? 'newStockSym' : 'newForexSym';
+  const sym = document.getElementById(inputId).value.toUpperCase().trim();
   if(!sym) return;
-  fetch('/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym})})
+  fetch('/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym, asset_class:assetClass})})
     .then(function(r){return r.json();}).then(function(d){
       showToast(d.status === 'added' ? sym+' added' : 'Already in watchlist');
       setTimeout(function(){location.reload();}, 1000);
@@ -368,7 +448,10 @@ setTimeout(function(){location.reload();}, 30000);
 </script>
 </body></html>'''
 
-@app.route('/login', methods=['GET','POST'])
+
+# --- Routes -----------------------------------------------------------
+
+@app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
         if request.form.get('password') == DASHBOARD_PASSWORD:
@@ -377,113 +460,145 @@ def login():
         return render_template_string(LOGIN_HTML, error=True)
     return render_template_string(LOGIN_HTML, error=False)
 
+
 @app.route('/')
 def index():
     return redirect(url_for('login'))
+
 
 @app.route('/dashboard')
 def dashboard():
     if not session.get('auth'):
         return redirect(url_for('login'))
+
+    check_daily_rollover()
+
     try:
-        acct = api.get_account()
-        equity = float(acct.equity)
-        buying_power = float(acct.buying_power)
-        last_equity = float(acct.last_equity)
-        pnl_raw = round(equity - last_equity, 2)
+        stock_acct = alpaca_broker.get_account_info()
+    except BrokerConnectionError as e:
+        logging.error("Alpaca account fetch failed: {}".format(e))
+        stock_acct = {"equity": 0.0, "buying_power": 0.0, "last_equity": 0.0}
 
-        now = time.strftime('%H:%M')
-        if not equity_history['times'] or equity_history['times'][-1] != now:
-            equity_history['times'].append(now)
-            equity_history['values'].append(round(equity, 2))
-            if len(equity_history['times']) > 100:
-                equity_history['times'].pop(0)
-                equity_history['values'].pop(0)
+    try:
+        forex_acct = oanda_broker.get_account_info()
+    except BrokerConnectionError as e:
+        logging.error("OANDA account fetch failed: {}".format(e))
+        forex_acct = {"equity": 0.0, "buying_power": 0.0, "last_equity": 0.0}
 
-        account_data = {
-            'equity': '{:,.2f}'.format(equity),
-            'buying_power': '{:,.2f}'.format(buying_power),
-            'pnl': '{:,.2f}'.format(abs(pnl_raw)),
-            'pnl_raw': pnl_raw
-        }
+    combined_equity = stock_acct["equity"] + forex_acct["equity"]
 
-        position = None
-        try:
-            positions = api.list_positions()
-            if positions:
-                p = positions[0]
-                upl = float(p.unrealized_pl)
-                position = {
-                    'symbol': p.symbol,
-                    'qty': p.qty,
-                    'avg_entry': '{:.2f}'.format(float(p.avg_entry_price)),
-                    'current_price': '{:.2f}'.format(float(p.current_price)),
-                    'unrealized_pl': round(upl, 2)
-                }
-        except:
-            pass
+    now = time.strftime('%H:%M')
+    if not state.equity_history['times'] or state.equity_history['times'][-1] != now:
+        state.equity_history['times'].append(now)
+        state.equity_history['values'].append(round(combined_equity, 2))
+        if len(state.equity_history['times']) > 100:
+            state.equity_history['times'].pop(0)
+            state.equity_history['values'].pop(0)
 
-        completed = [t for t in trade_log if t.get('pnl') is not None]
-        wins = [t for t in completed if t['pnl'] > 0]
-        losses = [t for t in completed if t['pnl'] < 0]
-        win_rate = round(len(wins) / len(completed) * 100) if completed else 0
-        avg_gain = round(sum(t['pnl'] for t in wins) / len(wins), 2) if wins else 0
-        avg_loss = round(abs(sum(t['pnl'] for t in losses) / len(losses)), 2) if losses else 0
-        best_trade = round(max([t['pnl'] for t in wins] or [0]), 2)
-        worst_trade = round(abs(min([t['pnl'] for t in losses] or [0])), 2)
+    positions = []
+    try:
+        for p in alpaca_broker.get_positions():
+            positions.append({
+                'symbol': p.symbol, 'qty': p.qty, 'asset_class': 'stock',
+                'avg_entry': '{:.2f}'.format(float(p.avg_entry_price)),
+                'current_price': '{:.2f}'.format(float(p.current_price)),
+                'unrealized_pl': round(float(p.unrealized_pl), 2),
+            })
+    except BrokerConnectionError:
+        pass
 
-        return render_template_string(DASHBOARD_HTML,
-            account=account_data, position=position, trades=trade_log,
-            eq_times=equity_history['times'], eq_values=equity_history['values'],
-            watched_symbols=watched_symbols, bot_enabled=bot_enabled,
-            risk_percent=risk_percent, max_trades_per_day=max_trades_per_day,
-            daily_loss_limit=daily_loss_limit, trades_today=trades_today,
-            win_rate=win_rate, avg_gain=avg_gain, avg_loss=avg_loss,
-            best_trade=best_trade, worst_trade=worst_trade, ws=WEBHOOK_SECRET)
-    except Exception as e:
-        logging.error('Dashboard error: {}'.format(e))
-        return 'Error: {}'.format(e), 500
+    try:
+        for p in oanda_broker.get_positions():
+            long_units = float(p.get('long', {}).get('units', 0))
+            short_units = float(p.get('short', {}).get('units', 0))
+            units = long_units if long_units != 0 else short_units
+            avg_price = p.get('long', {}).get('averagePrice') if long_units != 0 else p.get('short', {}).get('averagePrice')
+            unrealized = float(p.get('long', {}).get('unrealizedPL', 0)) + float(p.get('short', {}).get('unrealizedPL', 0))
+            positions.append({
+                'symbol': p['instrument'], 'qty': units, 'asset_class': 'forex',
+                'avg_entry': '{:.5f}'.format(float(avg_price or 0)),
+                'current_price': '—',
+                'unrealized_pl': round(unrealized, 2),
+            })
+    except BrokerConnectionError:
+        pass
+
+    completed = [t for t in state.trade_log if t.get('pnl') is not None]
+    wins = [t for t in completed if t['pnl'] > 0]
+    losses = [t for t in completed if t['pnl'] < 0]
+    win_rate = round(len(wins) / len(completed) * 100) if completed else 0
+    avg_gain = round(sum(t['pnl'] for t in wins) / len(wins), 2) if wins else 0
+    avg_loss = round(abs(sum(t['pnl'] for t in losses) / len(losses)), 2) if losses else 0
+    best_trade = round(max([t['pnl'] for t in wins] or [0]), 2)
+    worst_trade = round(abs(min([t['pnl'] for t in losses] or [0])), 2)
+
+    return render_template_string(
+        DASHBOARD_HTML,
+        trading_mode=config.TRADING_MODE,
+        combined_equity='{:,.2f}'.format(combined_equity),
+        stock_account={'equity': '{:,.2f}'.format(stock_acct['equity'])},
+        forex_account={'equity': '{:,.2f}'.format(forex_acct['equity'])},
+        stock_halted=risk_manager.trading_halted['stock'],
+        forex_halted=risk_manager.trading_halted['forex'],
+        account_halted=risk_manager.account_halted,
+        positions=positions,
+        trades=state.trade_log,
+        eq_times=state.equity_history['times'], eq_values=state.equity_history['values'],
+        watched_symbols=state.watched_symbols, bot_enabled=state.bot_enabled,
+        risk_percent=state.risk_percent, max_trades_per_day=state.max_trades_per_day,
+        trades_today=state.trades_today,
+        win_rate=win_rate, avg_gain=avg_gain, avg_loss=avg_loss,
+        best_trade=best_trade, worst_trade=worst_trade, ws=WEBHOOK_SECRET,
+    )
+
 
 @app.route('/toggle_bot', methods=['POST'])
 def toggle_bot():
-    global bot_enabled
     if not session.get('auth'):
         return jsonify({'error': 'unauthorized'}), 401
-    bot_enabled = not bot_enabled
-    return jsonify({'enabled': bot_enabled})
+    state.bot_enabled = not state.bot_enabled
+    return jsonify({'enabled': state.bot_enabled})
+
 
 @app.route('/settings', methods=['POST'])
 def settings():
-    global risk_percent, max_trades_per_day, daily_loss_limit
     if not session.get('auth'):
         return jsonify({'error': 'unauthorized'}), 401
-    data = request.json
+    data = request.json or {}
+    asset_class = data.get('asset_class')
+    if asset_class not in ('stock', 'forex'):
+        return jsonify({'error': 'asset_class must be stock or forex'}), 400
     if 'risk_percent' in data:
-        risk_percent = int(data['risk_percent'])
+        state.risk_percent[asset_class] = int(data['risk_percent'])
     if 'max_trades_per_day' in data:
-        max_trades_per_day = int(data['max_trades_per_day'])
-    if 'daily_loss_limit' in data:
-        daily_loss_limit = int(data['daily_loss_limit'])
+        state.max_trades_per_day[asset_class] = int(data['max_trades_per_day'])
     return jsonify({'status': 'updated'})
+
 
 @app.route('/watchlist', methods=['POST'])
 def add_watchlist():
     if not session.get('auth'):
         return jsonify({'error': 'unauthorized'}), 401
-    sym = request.json.get('symbol', '').upper()
-    if sym and sym not in watched_symbols:
-        watched_symbols.append(sym)
+    data = request.json or {}
+    sym = data.get('symbol', '').upper()
+    asset_class = data.get('asset_class') or asset_class_for_symbol(sym)
+    if asset_class not in ('stock', 'forex'):
+        return jsonify({'error': 'invalid asset_class'}), 400
+    if sym and sym not in state.watched_symbols[asset_class]:
+        state.watched_symbols[asset_class].append(sym)
         return jsonify({'status': 'added'})
     return jsonify({'status': 'exists'})
 
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    global trades_today
     data = request.json
     if not data:
         return jsonify({'error': 'no data'}), 415
     if data.get('secret') != WEBHOOK_SECRET:
         return jsonify({'error': 'unauthorized'}), 401
+
+    check_daily_rollover()
 
     action = data.get('action')
     symbol = data.get('symbol')
@@ -493,63 +608,91 @@ def webhook():
         return jsonify({'error': 'invalid symbol'}), 400
 
     is_manual = data.get('manual', False)
+    asset_class = asset_class_for_symbol(symbol)
+    broker = BROKERS[asset_class]
 
-    if not bot_enabled and not is_manual:
+    if not state.bot_enabled and not is_manual:
         return jsonify({'error': 'bot paused'}), 400
-    if trades_today >= max_trades_per_day and not is_manual:
-        return jsonify({'error': 'max trades reached'}), 400
-
-    daily_pnl = sum(t['pnl'] for t in trade_log if t.get('pnl') is not None)
-    if daily_pnl <= -daily_loss_limit and not is_manual:
-        return jsonify({'error': 'daily loss limit hit'}), 400
+    if state.trades_today[asset_class] >= state.max_trades_per_day[asset_class] and not is_manual:
+        return jsonify({'error': 'max {} trades reached for today'.format(asset_class)}), 400
 
     signal_key = '{0}_{1}'.format(symbol, action)
     now = time.time()
     if not is_manual:
-        if signal_key in last_signal_time:
-            if now - last_signal_time[signal_key] < 60:
+        if signal_key in state.last_signal_time:
+            if now - state.last_signal_time[signal_key] < 60:
                 return jsonify({'status': 'duplicate ignored'}), 200
-    last_signal_time[signal_key] = now
+    state.last_signal_time[signal_key] = now
 
     try:
-        acct = api.get_account()
-        equity = float(acct.equity)
-        risk_amount = equity * (risk_percent / 100.0)
-        price = float(api.get_latest_trade(symbol).price)
-        qty = int(risk_amount / price)
-        if qty < 1:
-            return jsonify({'error': 'position too small'}), 400
+        account = broker.get_account_info()
+        price = broker.get_price(symbol)
+        risk_amount = account['equity'] * (state.risk_percent[asset_class] / 100.0)
+
+        if asset_class == 'stock':
+            size = int(risk_amount / price)
+            if size < 1:
+                return jsonify({'error': 'position too small'}), 400
+        else:
+            # Simplified forex sizing: treat risk_amount as notional units.
+            # This does NOT account for pip value or lot conventions properly yet —
+            # revisit before trading real size on forex.
+            size = int(risk_amount)
+            if size < 1:
+                return jsonify({'error': 'position too small'}), 400
+
+        approved, reason = risk_manager.check_trade(broker, symbol, action, size, asset_class)
+        if not approved:
+            return jsonify({'error': reason}), 400
 
         pnl = None
         if action == 'sell':
-            last_buy = next((t for t in reversed(trade_log) if t['action'] == 'buy' and t['symbol'] == symbol), None)
+            last_buy = next(
+                (t for t in reversed(state.trade_log)
+                 if t['action'] == 'buy' and t['symbol'] == symbol and t['asset_class'] == asset_class),
+                None
+            )
             if last_buy:
-                pnl = round((price - float(last_buy['price'])) * qty, 2)
+                pnl = round((price - float(last_buy['price'])) * size, 2)
 
-        if action == 'buy':
-            api.submit_order(symbol=symbol, qty=qty, side='buy', type='market', time_in_force='day')
-            logging.info('BUY {} shares of {}'.format(qty, symbol))
-        elif action == 'sell':
-            api.submit_order(symbol=symbol, qty=qty, side='sell', type='market', time_in_force='day')
-            logging.info('SELL {} shares of {}'.format(qty, symbol))
+        broker.place_order(symbol, action, size)
+        logging.info('{} {} {} of {} ({})'.format(action.upper(), size, asset_class, symbol, config.TRADING_MODE))
 
-        trades_today += 1
-        trade_log.append({
+        state.trades_today[asset_class] += 1
+        state.trade_log.append({
             'time': time.strftime('%H:%M:%S'),
             'action': action,
             'symbol': symbol,
-            'qty': qty,
-            'price': '{:.2f}'.format(price),
+            'asset_class': asset_class,
+            'qty': size,
+            'price': '{:.5f}'.format(price) if asset_class == 'forex' else '{:.2f}'.format(price),
             'pnl': pnl
         })
-        return jsonify({'status': 'order placed', 'qty': qty, 'symbol': symbol})
-    except Exception as e:
-        logging.error('Error: {}'.format(e))
-        return jsonify({'error': str(e)}), 500
+
+        if pnl is not None:
+            try:
+                risk_manager.record_trade_result(asset_class, pnl, get_combined_equity())
+            except BrokerConnectionError:
+                pass
+
+        return jsonify({'status': 'order placed', 'qty': size, 'symbol': symbol, 'asset_class': asset_class})
+
+    except InsufficientFundsError as e:
+        return jsonify({'error': str(e)}), 400
+    except MarketClosedError as e:
+        return jsonify({'error': str(e)}), 400
+    except InvalidSymbolError as e:
+        return jsonify({'error': str(e)}), 400
+    except BrokerConnectionError as e:
+        logging.error('Broker error: {}'.format(e))
+        return jsonify({'error': str(e)}), 502
+
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'running'})
+    return jsonify({'status': 'running', 'mode': config.TRADING_MODE})
+
 
 if __name__ == '__main__':
+    import os
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
