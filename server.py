@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
-import logging, time, datetime
+import logging, time, datetime, math
 
 import config
 import state
@@ -684,9 +684,11 @@ def webhook():
                 return jsonify({'error': 'position too small'}), 400
         elif asset_class == 'crypto':
             # Crypto supports fractional quantities (Alpaca allows down to
-            # 1e-6), so size directly off price rather than truncating to
-            # a whole share like stocks.
-            size = round(risk_amount / price, 6)
+            # 1e-6). Round DOWN (floor), not to-nearest — rounding up even
+            # a fraction of a unit can push position_value a cent or two
+            # over the risk manager's cap, causing a correctly-sized trade
+            # to get rejected right at the boundary.
+            size = math.floor((risk_amount / price) * 1_000_000) / 1_000_000
             if size <= 0:
                 return jsonify({'error': 'position too small'}), 400
         else:
