@@ -30,8 +30,16 @@ class RiskManager:
         """Call once per day (e.g. on first trade or a daily reset job)."""
         self.starting_equity_today = total_equity
 
-    def check_trade(self, broker, symbol, side, size, asset_class):
-        """Returns (approved: bool, reason: str)."""
+    def check_trade(self, broker, symbol, side, size, asset_class, price=None):
+        """Returns (approved: bool, reason: str).
+
+        `price` should be the SAME price snapshot the caller used to size
+        the trade. If omitted, we fetch our own — but for fast-moving
+        assets (crypto especially) that can cause a price-drift mismatch
+        where a correctly-sized trade gets rejected because the price
+        ticked between sizing and validation. Always pass price when you
+        have it.
+        """
         if self.account_halted:
             return False, "ACCOUNT-WIDE halt active - all trading stopped"
 
@@ -46,8 +54,10 @@ class RiskManager:
             self.trading_halted[asset_class] = True
             return False, "{} daily loss limit exceeded, halting {} only".format(asset_class, asset_class)
 
-        # position size cap
-        price = broker.get_price(symbol)
+        # position size cap — use the caller's price snapshot if given,
+        # so sizing and validation agree even on fast-moving assets
+        if price is None:
+            price = broker.get_price(symbol)
         position_value = float(size) * price
         max_allowed = account["equity"] * rules["max_position_size_pct"]
         if position_value > max_allowed:
