@@ -53,15 +53,21 @@ BROKER_CONFIG = {
 
 # Per-mode, per-asset-class risk limits.
 # Tighter on live than paper, per what we discussed.
+# Crypto gets its OWN (tighter) position sizing — it runs 3-5x the
+# volatility of stocks/forex, so reusing their thresholds would be
+# too loose. No max_leverage key for crypto: Alpaca crypto is spot-only
+# (non-marginable), so leverage isn't a relevant risk lever here.
 RISK_CONFIG = {
     "paper": {
         "stock": {"max_position_size_pct": 0.10, "max_daily_loss_pct": 0.05, "max_open_positions": 5},
         "forex": {"max_position_size_pct": 0.05, "max_daily_loss_pct": 0.03, "max_open_positions": 3, "max_leverage": 20},
+        "crypto": {"max_position_size_pct": 0.03, "max_daily_loss_pct": 0.02, "max_open_positions": 3},
         "account_wide": {"max_daily_loss_pct": 0.08},
     },
     "live": {
         "stock": {"max_position_size_pct": 0.05, "max_daily_loss_pct": 0.03, "max_open_positions": 5},
         "forex": {"max_position_size_pct": 0.02, "max_daily_loss_pct": 0.01, "max_open_positions": 3, "max_leverage": 10},
+        "crypto": {"max_position_size_pct": 0.015, "max_daily_loss_pct": 0.01, "max_open_positions": 3},
         "account_wide": {"max_daily_loss_pct": 0.05},
     },
 }
