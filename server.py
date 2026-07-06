@@ -30,24 +30,34 @@ oanda_broker = OandaBroker(
     base_url=oanda_creds["base_url"],
 )
 
-BROKERS = {"stock": alpaca_broker, "forex": oanda_broker}
+BROKERS = {"stock": alpaca_broker, "forex": oanda_broker, "crypto": alpaca_broker}
 
 risk_manager = RiskManager(config.get_risk_config())
 
 
 def asset_class_for_symbol(symbol):
-    """Forex pairs use OANDA's underscore format, e.g. EUR_USD. Anything
-    else (AAPL, TSLA, ...) is treated as a stock/Alpaca symbol."""
-    return "forex" if "_" in symbol else "stock"
+    """Crypto pairs use Alpaca's slash format, e.g. BTC/USD.
+    Forex pairs use OANDA's underscore format, e.g. EUR_USD.
+    Anything else (AAPL, TSLA, ...) is treated as a stock/Alpaca symbol."""
+    if "/" in symbol:
+        return "crypto"
+    if "_" in symbol:
+        return "forex"
+    return "stock"
 
 
 def get_combined_equity():
-    """Best-effort combined equity across both brokers. If one broker's
-    API call fails, fall back to just the other so a single outage
-    doesn't take down the whole risk check."""
+    """Best-effort combined equity across DISTINCT brokers. Stock and
+    crypto share the same Alpaca account/equity, so we dedupe by broker
+    identity here — otherwise Alpaca's balance would get counted twice
+    and make the account-wide circuit breaker math wrong."""
     total = 0.0
     got_any = False
+    seen_brokers = []
     for broker in BROKERS.values():
+        if any(broker is seen for seen in seen_brokers):
+            continue
+        seen_brokers.append(broker)
         try:
             total += broker.get_account_info()["equity"]
             got_any = True
@@ -64,7 +74,7 @@ def check_daily_rollover():
     today = datetime.date.today().isoformat()
     if state.current_day != today:
         state.current_day = today
-        state.trades_today = {"stock": 0, "forex": 0}
+        state.trades_today = {"stock": 0, "forex": 0, "crypto": 0}
         try:
             risk_manager.reset_daily(get_combined_equity())
         except BrokerConnectionError:
@@ -201,9 +211,10 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 
 <div class="asset-split">
   <div class="asset-card">
-    <div class="name">Stocks (Alpaca)</div>
+    <div class="name">Stocks + Crypto (Alpaca)</div>
     <div class="val">${{ stock_account.equity }}</div>
-    {% if stock_halted %}<div class="halted">⛔ halted today</div>{% endif %}
+    {% if stock_halted %}<div class="halted">⛔ stocks halted</div>{% endif %}
+    {% if crypto_halted %}<div class="halted">⛔ crypto halted</div>{% endif %}
   </div>
   <div class="asset-card">
     <div class="name">Forex (OANDA)</div>
@@ -211,6 +222,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
     {% if forex_halted %}<div class="halted">⛔ halted today</div>{% endif %}
   </div>
 </div>
+<div style="text-align:center;color:#444;font-size:11px;margin-top:-16px;margin-bottom:20px">Stocks and crypto share one Alpaca balance — not two separate pools</div>
 
 {% if account_halted %}
 <div class="card" style="border:1.5px solid #ff444460;margin-bottom:16px;text-align:center;color:#ff4444;font-weight:700">
@@ -221,7 +233,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
 <div class="grid3">
   <div class="card">
     <div class="card-label">Trades today</div>
-    <div class="card-value white">{{ trades_today.stock + trades_today.forex }}</div>
+    <div class="card-value white">{{ trades_today.stock + trades_today.forex + trades_today.crypto }}</div>
   </div>
   <div class="card">
     <div class="card-label">Win rate</div>
@@ -299,9 +311,21 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
   </div>
 </div>
 
+<div class="section-title">Watchlist — crypto</div>
+<div class="watchlist">
+  {% for sym in watched_symbols.crypto %}
+  <div class="watch-row"><span class="watch-sym">{{ sym }}</span><span class="watch-price" id="price-{{ sym }}">—</span></div>
+  {% endfor %}
+  {% if not watched_symbols.crypto %}<div class="empty">No symbols added</div>{% endif %}
+  <div class="add-sym">
+    <input type="text" id="newCryptoSym" placeholder="Add crypto pair (e.g. ETH/USD)" maxlength="10">
+    <button onclick="addSymbol('crypto')">Add</button>
+  </div>
+</div>
+
 <div class="section-title">Manual trade</div>
 <div class="card">
-  <input type="text" class="sym-input" id="manualSym" placeholder="Symbol (e.g. AAPL or EUR_USD)">
+  <input type="text" class="sym-input" id="manualSym" placeholder="Symbol (e.g. AAPL, EUR_USD, or BTC/USD)">
   <div class="manual-btns">
     <button class="buy-btn" onclick="manualTrade('buy')">Buy</button>
     <button class="sell-btn" onclick="manualTrade('sell')">Sell</button>
@@ -346,6 +370,25 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
     <div style="display:flex;align-items:center;gap:10px">
       <input type="range" min="1" max="50" value="{{ max_trades_per_day.forex }}" id="forexMaxSlider" oninput="updateMaxTrades('forex', this.value)">
       <span class="range-val" id="forexMaxVal">{{ max_trades_per_day.forex }}</span>
+    </div>
+  </div>
+  <div class="control-row">
+    <div>
+      <div class="control-label">Crypto risk per trade</div>
+      <div class="control-sub">% of combined equity per signal (kept low — crypto is volatile)</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <input type="range" min="1" max="50" value="{{ risk_percent.crypto }}" id="cryptoRiskSlider" oninput="updateRisk('crypto', this.value)">
+      <span class="range-val" id="cryptoRiskVal">{{ risk_percent.crypto }}%</span>
+    </div>
+  </div>
+  <div class="control-row">
+    <div>
+      <div class="control-label">Max crypto trades/day</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px">
+      <input type="range" min="1" max="50" value="{{ max_trades_per_day.crypto }}" id="cryptoMaxSlider" oninput="updateMaxTrades('crypto', this.value)">
+      <span class="range-val" id="cryptoMaxVal">{{ max_trades_per_day.crypto }}</span>
     </div>
   </div>
   <button class="kill-btn {{ 'active' if not bot_enabled else '' }}" onclick="toggleBot()">
@@ -421,8 +464,8 @@ function toggleBot(){
 }
 
 function addSymbol(assetClass){
-  const inputId = assetClass === 'stock' ? 'newStockSym' : 'newForexSym';
-  const sym = document.getElementById(inputId).value.toUpperCase().trim();
+  const inputMap = {stock: 'newStockSym', forex: 'newForexSym', crypto: 'newCryptoSym'};
+  const sym = document.getElementById(inputMap[assetClass]).value.toUpperCase().trim();
   if(!sym) return;
   fetch('/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym, asset_class:assetClass})})
     .then(function(r){return r.json();}).then(function(d){
@@ -498,10 +541,15 @@ def dashboard():
     positions = []
     try:
         for p in alpaca_broker.get_positions():
+            # alpaca_broker.get_positions() returns BOTH stocks and crypto
+            # (same account) — split them back out by symbol format so the
+            # dashboard tags each correctly instead of lumping crypto in as 'stock'.
+            ac = asset_class_for_symbol(p.symbol)
+            price_fmt = '{:.4f}' if ac == 'crypto' else '{:.2f}'
             positions.append({
-                'symbol': p.symbol, 'qty': p.qty, 'asset_class': 'stock',
-                'avg_entry': '{:.2f}'.format(float(p.avg_entry_price)),
-                'current_price': '{:.2f}'.format(float(p.current_price)),
+                'symbol': p.symbol, 'qty': p.qty, 'asset_class': ac,
+                'avg_entry': price_fmt.format(float(p.avg_entry_price)),
+                'current_price': price_fmt.format(float(p.current_price)),
                 'unrealized_pl': round(float(p.unrealized_pl), 2),
             })
     except BrokerConnectionError:
@@ -540,6 +588,7 @@ def dashboard():
         forex_account={'equity': '{:,.2f}'.format(forex_acct['equity'])},
         stock_halted=risk_manager.trading_halted['stock'],
         forex_halted=risk_manager.trading_halted['forex'],
+        crypto_halted=risk_manager.trading_halted['crypto'],
         account_halted=risk_manager.account_halted,
         positions=positions,
         trades=state.trade_log,
@@ -566,8 +615,8 @@ def settings():
         return jsonify({'error': 'unauthorized'}), 401
     data = request.json or {}
     asset_class = data.get('asset_class')
-    if asset_class not in ('stock', 'forex'):
-        return jsonify({'error': 'asset_class must be stock or forex'}), 400
+    if asset_class not in ('stock', 'forex', 'crypto'):
+        return jsonify({'error': 'asset_class must be stock, forex, or crypto'}), 400
     if 'risk_percent' in data:
         state.risk_percent[asset_class] = int(data['risk_percent'])
     if 'max_trades_per_day' in data:
@@ -582,7 +631,7 @@ def add_watchlist():
     data = request.json or {}
     sym = data.get('symbol', '').upper()
     asset_class = data.get('asset_class') or asset_class_for_symbol(sym)
-    if asset_class not in ('stock', 'forex'):
+    if asset_class not in ('stock', 'forex', 'crypto'):
         return jsonify({'error': 'invalid asset_class'}), 400
     if sym and sym not in state.watched_symbols[asset_class]:
         state.watched_symbols[asset_class].append(sym)
@@ -633,6 +682,13 @@ def webhook():
             size = int(risk_amount / price)
             if size < 1:
                 return jsonify({'error': 'position too small'}), 400
+        elif asset_class == 'crypto':
+            # Crypto supports fractional quantities (Alpaca allows down to
+            # 1e-6), so size directly off price rather than truncating to
+            # a whole share like stocks.
+            size = round(risk_amount / price, 6)
+            if size <= 0:
+                return jsonify({'error': 'position too small'}), 400
         else:
             # Simplified forex sizing: treat risk_amount as notional units.
             # This does NOT account for pip value or lot conventions properly yet —
@@ -665,7 +721,11 @@ def webhook():
             'symbol': symbol,
             'asset_class': asset_class,
             'qty': size,
-            'price': '{:.5f}'.format(price) if asset_class == 'forex' else '{:.2f}'.format(price),
+            'price': (
+                '{:.5f}'.format(price) if asset_class == 'forex'
+                else '{:.4f}'.format(price) if asset_class == 'crypto'
+                else '{:.2f}'.format(price)
+            ),
             'pnl': pnl
         })
 
