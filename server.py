@@ -697,7 +697,7 @@ def webhook():
             if size < 1:
                 return jsonify({'error': 'position too small'}), 400
 
-        approved, reason = risk_manager.check_trade(broker, symbol, action, size, asset_class)
+        approved, reason = risk_manager.check_trade(broker, symbol, action, size, asset_class, price=price)
         if not approved:
             return jsonify({'error': reason}), 400
 
