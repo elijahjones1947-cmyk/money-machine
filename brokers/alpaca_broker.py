@@ -11,7 +11,14 @@ from errors import (
 
 class AlpacaBroker(BrokerInterface):
     """
-    Wraps the alpaca-trade-api SDK. Stocks are sized in whole shares.
+    Wraps the alpaca-trade-api SDK. Handles BOTH stocks and crypto through
+    the same account/credentials (that's how Alpaca actually works — one
+    account, one equity balance, covering both asset classes).
+
+    Stocks: whole-share quantities, 'day' time_in_force.
+    Crypto: fractional quantities allowed, symbol format 'BTC/USD' (a
+    slash is what tells us a symbol is crypto), and Alpaca only accepts
+    'gtc' or 'ioc' time_in_force for crypto orders (NOT 'day').
 
     NOTE: we deliberately catch the broad `Exception` (not just Alpaca's
     own APIError) around every call. The underlying SDK can raise plain
@@ -23,25 +30,33 @@ class AlpacaBroker(BrokerInterface):
     def __init__(self, api_key, secret_key, base_url):
         self.client = tradeapi.REST(api_key, secret_key, base_url, api_version="v2")
 
+    @staticmethod
+    def _is_crypto(symbol):
+        return "/" in symbol
+
     def get_price(self, symbol):
         try:
+            if self._is_crypto(symbol):
+                trades = self.client.get_latest_crypto_trades([symbol])
+                return float(trades[symbol].price)
             return float(self.client.get_latest_trade(symbol).price)
         except Exception as e:
             self._translate_error(e, symbol)
 
     def place_order(self, symbol, side, size, order_type="market"):
         try:
-            qty = int(size)
-            if qty < 1:
+            is_crypto = self._is_crypto(symbol)
+            qty = round(float(size), 6) if is_crypto else int(size)
+            if qty <= 0:
                 raise InvalidSymbolError(
-                    "Alpaca: computed quantity < 1 share for {}".format(symbol)
+                    "Alpaca: computed quantity <= 0 for {}".format(symbol)
                 )
             return self.client.submit_order(
                 symbol=symbol,
                 qty=qty,
                 side=side,
                 type=order_type,
-                time_in_force="day",
+                time_in_force="gtc" if is_crypto else "day",
             )
         except InvalidSymbolError:
             raise
