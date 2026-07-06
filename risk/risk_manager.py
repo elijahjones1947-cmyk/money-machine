@@ -2,20 +2,27 @@ class RiskManager:
     """
     Sits between a strategy's decision and the broker's execution.
     Tracks daily P&L and halt status SEPARATELY per asset class
-    (stock vs forex) so a bad day in one doesn't shut down the other,
-    plus one account-wide breaker that overrides everything if your
-    TOTAL combined equity (both brokers) drops too far in a day.
+    (stock / forex / crypto / ...) so a bad day in one doesn't shut
+    down the others, plus one account-wide breaker that overrides
+    everything if your TOTAL combined equity (across all distinct
+    brokers) drops too far in a day.
+
+    Asset classes are derived from whatever keys config has (besides
+    "account_wide"), so adding a new asset class is just a matter of
+    adding a new bucket to RISK_CONFIG — nothing here needs to change.
     """
 
     def __init__(self, config):
         # config = {
         #   "stock": {"max_position_size_pct": .., "max_daily_loss_pct": .., "max_open_positions": ..},
         #   "forex": {"max_position_size_pct": .., "max_daily_loss_pct": .., "max_open_positions": .., "max_leverage": ..},
+        #   "crypto": {"max_position_size_pct": .., "max_daily_loss_pct": .., "max_open_positions": ..},
         #   "account_wide": {"max_daily_loss_pct": ..}
         # }
         self.config = config
-        self.daily_pnl = {"stock": 0.0, "forex": 0.0}
-        self.trading_halted = {"stock": False, "forex": False}
+        self.asset_classes = [k for k in config.keys() if k != "account_wide"]
+        self.daily_pnl = {k: 0.0 for k in self.asset_classes}
+        self.trading_halted = {k: False for k in self.asset_classes}
         self.account_halted = False
         self.starting_equity_today = None
 
@@ -51,7 +58,8 @@ class RiskManager:
         if len(current_positions) >= rules["max_open_positions"]:
             return False, "Max open positions reached for {}".format(asset_class)
 
-        # leverage check (mainly relevant for forex)
+        # leverage check (mainly relevant for forex; crypto/stock configs
+        # simply omit max_leverage, so this is skipped for them)
         leverage_cap = rules.get("max_leverage")
         if leverage_cap:
             leverage = position_value / account["equity"]
@@ -63,7 +71,8 @@ class RiskManager:
     def record_trade_result(self, asset_class, pnl, total_account_equity):
         """
         Call after every trade closes (or on a periodic equity check).
-        total_account_equity = COMBINED equity across Alpaca + OANDA.
+        total_account_equity = COMBINED equity across all DISTINCT brokers
+        (stock + crypto share one Alpaca balance, so don't double-count).
         """
         self.daily_pnl[asset_class] += pnl
 
@@ -79,7 +88,7 @@ class RiskManager:
             self.account_halted = True
 
     def reset_daily(self, total_equity_now=None):
-        self.daily_pnl = {"stock": 0.0, "forex": 0.0}
-        self.trading_halted = {"stock": False, "forex": False}
+        self.daily_pnl = {k: 0.0 for k in self.asset_classes}
+        self.trading_halted = {k: False for k in self.asset_classes}
         self.account_halted = False
         self.starting_equity_today = total_equity_now
