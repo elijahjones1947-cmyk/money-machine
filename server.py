@@ -4,6 +4,8 @@ import logging, time, datetime, math
 import config
 import state
 import db
+import regime
+from apscheduler.schedulers.background import BackgroundScheduler
 from errors import InsufficientFundsError, MarketClosedError, InvalidSymbolError, BrokerConnectionError
 from brokers.alpaca_broker import AlpacaBroker
 from brokers.oanda_broker import OandaBroker
@@ -76,6 +78,7 @@ def load_persisted_state():
                 "qty": float(t["qty"]),
                 "price": str(t["price"]),
                 "pnl": float(t["pnl"]) if t["pnl"] is not None else None,
+                "regime": t.get("regime"),
             }
             for t in reversed(recent_trades)  # DB gives newest-first, state.py expects oldest-first
         ]
@@ -96,6 +99,35 @@ def load_persisted_state():
 
 
 load_persisted_state()
+
+# --- Market regime classifier scheduler ----------------------------------
+# Matches each asset class's alert timeframe from TradingView: 1h for
+# stock/crypto, 15m for forex. Runs independently of trading itself — a
+# failure here should never affect order placement, only logging quality.
+_REGIME_TIMEFRAMES = {"stock": "1h", "forex": "15m", "crypto": "1h"}
+
+
+def run_regime_checks():
+    for asset_class, symbols in state.watched_symbols.items():
+        broker = BROKERS.get(asset_class)
+        if broker is None:
+            continue
+        timeframe = _REGIME_TIMEFRAMES.get(asset_class, "1h")
+        for symbol in symbols:
+            try:
+                result = regime.run_regime_check(
+                    broker, symbol, asset_class, config.get_regime_config(),
+                    timeframe=timeframe, db_module=db,
+                )
+                logging.info("Regime check {}: {}".format(symbol, result))
+            except Exception as e:
+                logging.warning("Regime check failed for {}: {}".format(symbol, e))
+
+
+scheduler = BackgroundScheduler(daemon=True)
+scheduler.add_job(run_regime_checks, "interval", minutes=15, next_run_time=None)
+scheduler.start()
+# --- end market regime classifier scheduler ------------------------------
 
 
 def asset_class_for_symbol(symbol):
@@ -221,6 +253,14 @@ body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF
 .badge.buy{background:#00d64f22;color:#00d64f}
 .badge.sell{background:#ff444422;color:#ff4444}
 .asset-badge{padding:3px 8px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase;background:#2a2a2a;color:#999}
+.regime-badge{padding:3px 8px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase}
+.regime-badge.trending{background:#00d64f22;color:#00d64f}
+.regime-badge.volatile{background:#ff9d0022;color:#ff9d00}
+.regime-badge.choppy{background:#4488ff22;color:#4488ff}
+.regime-badge.unknown{background:#2a2a2a;color:#666}
+.regime-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px}
+.regime-card{background:#111;border-radius:14px;padding:14px;text-align:center}
+.regime-card .rsym{font-size:13px;font-weight:600;margin-bottom:6px}
 .trade-sym{font-size:15px;font-weight:600}
 .trade-detail{color:#555;font-size:12px;margin-top:2px}
 .trade-pnl{font-size:15px;font-weight:700}
@@ -325,6 +365,17 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
     <div class="card-label">Worst trade</div>
     <div class="card-value red">-${{ worst_trade }}</div>
   </div>
+</div>
+
+<div class="section-title">Market regime</div>
+<div class="regime-grid">
+  {% for r in regimes %}
+  <div class="regime-card">
+    <div class="rsym">{{ r.symbol }} <span class="asset-badge">{{ r.asset_class }}</span></div>
+    <span class="regime-badge {{ r.regime }}">{{ r.regime }}</span>
+  </div>
+  {% endfor %}
+  {% if not regimes %}<div class="empty">No watched symbols yet</div>{% endif %}
 </div>
 
 <div class="section-title">Open positions</div>
@@ -467,7 +518,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
       <div class="trade-left">
         <span class="badge {{ trade.action }}">{{ trade.action }}</span>
         <div>
-          <div class="trade-sym">{{ trade.symbol }} <span class="asset-badge">{{ trade.asset_class }}</span></div>
+          <div class="trade-sym">{{ trade.symbol }} <span class="asset-badge">{{ trade.asset_class }}</span> {% if trade.regime %}<span class="regime-badge {{ trade.regime }}">{{ trade.regime }}</span>{% endif %}</div>
           <div class="trade-detail">{{ trade.qty }} @ ${{ trade.price }} · {{ trade.time }}</div>
         </div>
       </div>
@@ -647,6 +698,19 @@ def dashboard():
     best_trade = round(max([t['pnl'] for t in wins] or [0]), 2)
     worst_trade = round(abs(min([t['pnl'] for t in losses] or [0])), 2)
 
+    regimes = []
+    for asset_class, symbols in state.watched_symbols.items():
+        for sym in symbols:
+            try:
+                r = db.get_latest_regime(sym)
+            except Exception:
+                r = None
+            regimes.append({
+                'symbol': sym,
+                'asset_class': asset_class,
+                'regime': r['regime'] if r else 'unknown',
+            })
+
     return render_template_string(
         DASHBOARD_HTML,
         trading_mode=config.TRADING_MODE,
@@ -665,6 +729,7 @@ def dashboard():
         trades_today=state.trades_today,
         win_rate=win_rate, avg_gain=avg_gain, avg_loss=avg_loss,
         best_trade=best_trade, worst_trade=worst_trade, ws=WEBHOOK_SECRET,
+        regimes=regimes,
     )
 
 
@@ -806,6 +871,17 @@ def webhook():
         broker.place_order(symbol, action, size)
         logging.info('{} {} {} of {} ({})'.format(action.upper(), size, asset_class, symbol, config.TRADING_MODE))
 
+        # Attach whatever regime tag we most recently computed for this
+        # symbol (from the scheduled classifier) — a DB miss just means
+        # no regime data exists yet for a brand-new symbol, not an error.
+        trade_regime = None
+        try:
+            latest = db.get_latest_regime(symbol)
+            if latest:
+                trade_regime = latest['regime']
+        except Exception as e:
+            logging.warning('Could not look up regime for {}: {}'.format(symbol, e))
+
         state.trades_today[asset_class] += 1
         price_str = (
             '{:.5f}'.format(price) if asset_class == 'forex'
@@ -819,10 +895,11 @@ def webhook():
             'asset_class': asset_class,
             'qty': size,
             'price': price_str,
-            'pnl': pnl
+            'pnl': pnl,
+            'regime': trade_regime,
         })
         try:
-            db.save_trade(action, symbol, asset_class, size, price, pnl)
+            db.save_trade(action, symbol, asset_class, size, price, pnl, regime=trade_regime)
         except Exception as e:
             # Trade already executed on the broker — a DB hiccup here should
             # never look like the trade itself failed. Log and move on.
