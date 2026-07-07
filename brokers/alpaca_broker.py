@@ -1,4 +1,5 @@
 import alpaca_trade_api as tradeapi
+from alpaca_trade_api.rest import TimeFrame, TimeFrameUnit
 
 from brokers.base import BrokerInterface
 from errors import (
@@ -7,6 +8,16 @@ from errors import (
     InvalidSymbolError,
     BrokerConnectionError,
 )
+
+
+_TIMEFRAME_MAP = {
+    "1m": TimeFrame.Minute,
+    "5m": TimeFrame(5, TimeFrameUnit.Minute),
+    "15m": TimeFrame(15, TimeFrameUnit.Minute),
+    "1h": TimeFrame.Hour,
+    "4h": TimeFrame(4, TimeFrameUnit.Hour),
+    "1d": TimeFrame.Day,
+}
 
 
 class AlpacaBroker(BrokerInterface):
@@ -85,6 +96,31 @@ class AlpacaBroker(BrokerInterface):
             return self.client.cancel_order(order_id)
         except Exception as e:
             self._translate_error(e, None)
+
+    def get_ohlcv(self, symbol, timeframe="1h", limit=100):
+        tf = _TIMEFRAME_MAP.get(timeframe)
+        if tf is None:
+            raise ValueError("Unsupported timeframe: {}".format(timeframe))
+        try:
+            is_crypto = "/" in symbol
+            if is_crypto:
+                bars = self.client.get_crypto_bars(symbol, tf, limit=limit)
+            else:
+                bars = self.client.get_bars(symbol, tf, limit=limit)
+            df = bars.df
+            return [
+                {
+                    "time": idx.to_pydatetime(),
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "volume": float(row["volume"]),
+                }
+                for idx, row in df.iterrows()
+            ]
+        except Exception as e:
+            self._translate_error(e, symbol)
 
     def _translate_error(self, e, symbol):
         """Map any Alpaca/network failure into our standard error types."""
