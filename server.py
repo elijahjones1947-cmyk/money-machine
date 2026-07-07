@@ -3,6 +3,7 @@ import logging, time, datetime, math
 
 import config
 import state
+import db
 from errors import InsufficientFundsError, MarketClosedError, InvalidSymbolError, BrokerConnectionError
 from brokers.alpaca_broker import AlpacaBroker
 from brokers.oanda_broker import OandaBroker
@@ -33,6 +34,68 @@ oanda_broker = OandaBroker(
 BROKERS = {"stock": alpaca_broker, "forex": oanda_broker, "crypto": alpaca_broker}
 
 risk_manager = RiskManager(config.get_risk_config())
+
+# --- Database setup -----------------------------------------------------
+# Fixes the long-standing "everything resets when Railway restarts" issue —
+# settings, trade history, and equity curve now persist in Postgres and get
+# reloaded into the in-memory state.py cache on every startup.
+db.init_pool()
+db.init_schema()
+
+
+def load_persisted_state():
+    """Pull settings/trades/equity history from Postgres into the
+    in-memory state.py cache. Called once at startup. If the DB is
+    unreachable at this exact moment, we log it and boot with state.py's
+    hardcoded defaults rather than crashing — a DB hiccup on startup
+    shouldn't prevent the bot from running at all."""
+    try:
+        saved_risk = db.get_setting("risk_percent")
+        if saved_risk:
+            state.risk_percent.update(saved_risk)
+
+        saved_max = db.get_setting("max_trades_per_day")
+        if saved_max:
+            state.max_trades_per_day.update(saved_max)
+
+        saved_enabled = db.get_setting("bot_enabled")
+        if saved_enabled is not None:
+            state.bot_enabled = saved_enabled
+
+        saved_watchlist = db.get_setting("watched_symbols")
+        if saved_watchlist:
+            state.watched_symbols.update(saved_watchlist)
+
+        recent_trades = db.get_recent_trades(limit=200)
+        state.trade_log = [
+            {
+                "time": t["executed_at"].strftime("%H:%M:%S"),
+                "action": t["action"],
+                "symbol": t["symbol"],
+                "asset_class": t["asset_class"],
+                "qty": float(t["qty"]),
+                "price": str(t["price"]),
+                "pnl": float(t["pnl"]) if t["pnl"] is not None else None,
+            }
+            for t in reversed(recent_trades)  # DB gives newest-first, state.py expects oldest-first
+        ]
+
+        eq_rows = db.get_equity_history(limit=100)
+        state.equity_history = {
+            "times": [e["recorded_at"].strftime("%H:%M") for e in eq_rows],
+            "values": [float(e["equity"]) for e in eq_rows],
+        }
+
+        logging.info(
+            "Loaded persisted state: {} trades, {} equity points, settings restored".format(
+                len(state.trade_log), len(state.equity_history["times"])
+            )
+        )
+    except Exception as e:
+        logging.error("Could not load persisted state from DB, booting with defaults: {}".format(e))
+
+
+load_persisted_state()
 
 
 def asset_class_for_symbol(symbol):
@@ -537,6 +600,10 @@ def dashboard():
         if len(state.equity_history['times']) > 100:
             state.equity_history['times'].pop(0)
             state.equity_history['values'].pop(0)
+        try:
+            db.save_equity_point(combined_equity)
+        except Exception as e:
+            logging.warning('Could not persist equity point to DB: {}'.format(e))
 
     positions = []
     try:
@@ -606,6 +673,10 @@ def toggle_bot():
     if not session.get('auth'):
         return jsonify({'error': 'unauthorized'}), 401
     state.bot_enabled = not state.bot_enabled
+    try:
+        db.save_setting('bot_enabled', state.bot_enabled)
+    except Exception as e:
+        logging.warning('Could not persist bot_enabled to DB: {}'.format(e))
     return jsonify({'enabled': state.bot_enabled})
 
 
@@ -619,8 +690,16 @@ def settings():
         return jsonify({'error': 'asset_class must be stock, forex, or crypto'}), 400
     if 'risk_percent' in data:
         state.risk_percent[asset_class] = int(data['risk_percent'])
+        try:
+            db.save_setting('risk_percent', state.risk_percent)
+        except Exception as e:
+            logging.warning('Could not persist risk_percent to DB: {}'.format(e))
     if 'max_trades_per_day' in data:
         state.max_trades_per_day[asset_class] = int(data['max_trades_per_day'])
+        try:
+            db.save_setting('max_trades_per_day', state.max_trades_per_day)
+        except Exception as e:
+            logging.warning('Could not persist max_trades_per_day to DB: {}'.format(e))
     return jsonify({'status': 'updated'})
 
 
@@ -635,6 +714,10 @@ def add_watchlist():
         return jsonify({'error': 'invalid asset_class'}), 400
     if sym and sym not in state.watched_symbols[asset_class]:
         state.watched_symbols[asset_class].append(sym)
+        try:
+            db.save_setting('watched_symbols', state.watched_symbols)
+        except Exception as e:
+            logging.warning('Could not persist watched_symbols to DB: {}'.format(e))
         return jsonify({'status': 'added'})
     return jsonify({'status': 'exists'})
 
@@ -724,19 +807,26 @@ def webhook():
         logging.info('{} {} {} of {} ({})'.format(action.upper(), size, asset_class, symbol, config.TRADING_MODE))
 
         state.trades_today[asset_class] += 1
+        price_str = (
+            '{:.5f}'.format(price) if asset_class == 'forex'
+            else '{:.4f}'.format(price) if asset_class == 'crypto'
+            else '{:.2f}'.format(price)
+        )
         state.trade_log.append({
             'time': time.strftime('%H:%M:%S'),
             'action': action,
             'symbol': symbol,
             'asset_class': asset_class,
             'qty': size,
-            'price': (
-                '{:.5f}'.format(price) if asset_class == 'forex'
-                else '{:.4f}'.format(price) if asset_class == 'crypto'
-                else '{:.2f}'.format(price)
-            ),
+            'price': price_str,
             'pnl': pnl
         })
+        try:
+            db.save_trade(action, symbol, asset_class, size, price, pnl)
+        except Exception as e:
+            # Trade already executed on the broker — a DB hiccup here should
+            # never look like the trade itself failed. Log and move on.
+            logging.error('Trade succeeded but failed to persist to DB: {}'.format(e))
 
         if pnl is not None:
             try:
