@@ -159,3 +159,4 @@ class OandaBroker(BrokerInterface):
             raise InvalidSymbolError("OANDA: invalid instrument {}".format(symbol))
         raise BrokerConnectionError(
             "OANDA error ({}): {}".format(status_code, error_message or error_code or "unknown error")
+        )
