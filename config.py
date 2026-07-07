@@ -86,3 +86,24 @@ def get_broker_credentials(broker_name):
 
 def get_risk_config():
     return RISK_CONFIG[TRADING_MODE]
+
+
+# Regime classifier thresholds. ADX is a normalized 0-100 measure of trend
+# strength, so the standard Wilder threshold (25 = strong trend) applies
+# the same way across every asset class — no need to tune it per-asset.
+#
+# Bollinger Band width (as a % of price), however, genuinely differs by
+# asset class: forex majors typically show much narrower bands than
+# crypto even in "volatile" conditions, so each asset class needs its
+# own bb_width_volatile threshold. These are starting points to tune
+# once you have real regime data to look back on (which is exactly what
+# the backtesting phase, still ahead, will help validate).
+REGIME_CONFIG = {
+    "stock": {"adx_trend": 25, "bb_width_volatile": 5.0},
+    "forex": {"adx_trend": 25, "bb_width_volatile": 1.5},
+    "crypto": {"adx_trend": 25, "bb_width_volatile": 10.0},
+}
+
+
+def get_regime_config():
+    return REGIME_CONFIG
