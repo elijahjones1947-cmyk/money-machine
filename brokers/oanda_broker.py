@@ -9,6 +9,16 @@ from errors import (
 )
 
 
+_GRANULARITY_MAP = {
+    "1m": "M1",
+    "5m": "M5",
+    "15m": "M15",
+    "1h": "H1",
+    "4h": "H4",
+    "1d": "D",
+}
+
+
 class OandaBroker(BrokerInterface):
     """
     Talks to OANDA's v20 REST API directly via requests.
@@ -107,6 +117,34 @@ class OandaBroker(BrokerInterface):
         except requests.RequestException as e:
             raise BrokerConnectionError("OANDA connection error: {}".format(e))
 
+    def get_ohlcv(self, symbol, timeframe="1h", limit=100):
+        granularity = _GRANULARITY_MAP.get(timeframe)
+        if granularity is None:
+            raise ValueError("Unsupported timeframe: {}".format(timeframe))
+        url = "{}/v3/instruments/{}/candles".format(self.base_url, symbol)
+        params = {"granularity": granularity, "count": limit, "price": "M"}  # M = midpoint
+        try:
+            resp = self.session.get(url, params=params, timeout=10)
+            data = resp.json()
+            if resp.status_code != 200:
+                self._translate_error(resp.status_code, data, symbol)
+            bars = []
+            for c in data.get("candles", []):
+                if not c.get("complete", True):
+                    continue  # skip the still-forming current candle
+                mid = c["mid"]
+                bars.append({
+                    "time": c["time"],
+                    "open": float(mid["o"]),
+                    "high": float(mid["h"]),
+                    "low": float(mid["l"]),
+                    "close": float(mid["c"]),
+                    "volume": float(c.get("volume", 0)),
+                })
+            return bars
+        except requests.RequestException as e:
+            raise BrokerConnectionError("OANDA connection error: {}".format(e))
+
     def _translate_error(self, status_code, data, symbol):
         """Map OANDA's error response into our standard error types."""
         error_code = (data or {}).get("errorCode", "") or ""
@@ -121,4 +159,3 @@ class OandaBroker(BrokerInterface):
             raise InvalidSymbolError("OANDA: invalid instrument {}".format(symbol))
         raise BrokerConnectionError(
             "OANDA error ({}): {}".format(status_code, error_message or error_code or "unknown error")
-        )
