@@ -692,10 +692,17 @@ def webhook():
             if size <= 0:
                 return jsonify({'error': 'position too small'}), 400
         else:
-            # Simplified forex sizing: treat risk_amount as notional units.
-            # This does NOT account for pip value or lot conventions properly yet —
-            # revisit before trading real size on forex.
-            size = int(risk_amount)
+            # Forex units = risk_amount / price (same principle as stock
+            # shares and crypto quantity). Floor to a whole unit — forex
+            # position sizes are conventionally whole units, and flooring
+            # (not rounding-to-nearest) guarantees position_value never
+            # exceeds the risk manager's cap due to rounding.
+            #
+            # NOTE: this still doesn't account for pip value or standard
+            # lot-size conventions (micro/mini/standard lots) — it treats
+            # 1 unit as 1 unit of the base currency. Fine for testing;
+            # revisit before sizing real forex positions for live trading.
+            size = math.floor(risk_amount / price)
             if size < 1:
                 return jsonify({'error': 'position too small'}), 400
 
