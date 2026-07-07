@@ -44,3 +44,16 @@ class BrokerInterface(ABC):
     @abstractmethod
     def cancel_order(self, order_id):
         raise NotImplementedError
+
+    @abstractmethod
+    def get_ohlcv(self, symbol, timeframe="1h", limit=100):
+        """
+        Return historical OHLCV bars, oldest first, as a list of dicts:
+        [{"time": datetime, "open": float, "high": float, "low": float,
+          "close": float, "volume": float}, ...]
+
+        `timeframe` is a normalized string ('1m', '15m', '1h', '4h', '1d')
+        that each broker maps to its own API's format internally — callers
+        never need to know the broker-specific granularity syntax.
+        """
+        raise NotImplementedError
