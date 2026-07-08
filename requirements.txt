@@ -3,3 +3,4 @@ alpaca-trade-api
 requests
 psycopg2-binary
 apscheduler
+gunicorn
