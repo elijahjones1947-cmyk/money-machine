@@ -114,7 +114,10 @@ class AlpacaBroker(BrokerInterface):
             if is_crypto:
                 bars = self.client.get_crypto_bars(symbol, tf, limit=limit)
             else:
-                bars = self.client.get_bars(symbol, tf, limit=limit)
+                bars = self.client.get_bars(symbol, tf, limit=limit, feed="iex")
+                # feed="iex": free/basic Alpaca market data plans don't
+                # permit querying recent SIP data (the default feed) —
+                # IEX is included on every plan and has no such recency gate.
             df = bars.df
             return [
                 {
@@ -169,6 +172,7 @@ class AlpacaBroker(BrokerInterface):
                         start=start_str,
                         end=end_str,
                         limit=10000,
+                        feed="iex",  # see get_ohlcv() for why
                     )
                 df = bars.df
                 for idx, row in df.iterrows():
