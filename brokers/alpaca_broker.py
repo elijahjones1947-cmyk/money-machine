@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import TimeFrame, TimeFrameUnit
 
@@ -18,6 +20,12 @@ _TIMEFRAME_MAP = {
     "4h": TimeFrame(4, TimeFrameUnit.Hour),
     "1d": TimeFrame.Day,
 }
+
+# Chunk size for get_historical_bars. Requesting month-sized windows
+# (rather than one request for the whole range) keeps each call well
+# under Alpaca's per-request bar cap regardless of installed SDK
+# version, instead of depending on the SDK's own pagination behavior.
+_HISTORICAL_CHUNK_DAYS = 30
 
 
 class AlpacaBroker(BrokerInterface):
@@ -121,6 +129,58 @@ class AlpacaBroker(BrokerInterface):
             ]
         except Exception as e:
             self._translate_error(e, symbol)
+
+    def get_historical_bars(self, symbol, timeframe="1h", start=None, end=None):
+        """
+        Pulls OHLCV across [start, end) for backtesting, one
+        _HISTORICAL_CHUNK_DAYS-day chunk at a time, concatenated and
+        deduped by timestamp. Same dict shape as get_ohlcv().
+        """
+        if start is None or end is None:
+            raise ValueError("get_historical_bars requires both start and end")
+        tf = _TIMEFRAME_MAP.get(timeframe)
+        if tf is None:
+            raise ValueError("Unsupported timeframe: {}".format(timeframe))
+
+        is_crypto = self._is_crypto(symbol)
+        all_bars = {}  # keyed by ISO time string, dedupes overlapping chunk edges
+
+        chunk_start = start
+        while chunk_start < end:
+            chunk_end = min(chunk_start + timedelta(days=_HISTORICAL_CHUNK_DAYS), end)
+            try:
+                if is_crypto:
+                    bars = self.client.get_crypto_bars(
+                        symbol,
+                        tf,
+                        start=chunk_start.isoformat(),
+                        end=chunk_end.isoformat(),
+                        limit=10000,
+                    )
+                else:
+                    bars = self.client.get_bars(
+                        symbol,
+                        tf,
+                        start=chunk_start.isoformat(),
+                        end=chunk_end.isoformat(),
+                        limit=10000,
+                    )
+                df = bars.df
+                for idx, row in df.iterrows():
+                    t = idx.to_pydatetime()
+                    all_bars[t.isoformat()] = {
+                        "time": t,
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": float(row["volume"]),
+                    }
+            except Exception as e:
+                self._translate_error(e, symbol)
+            chunk_start = chunk_end
+
+        return [all_bars[k] for k in sorted(all_bars.keys())]
 
     def _translate_error(self, e, symbol):
         """Map any Alpaca/network failure into our standard error types."""

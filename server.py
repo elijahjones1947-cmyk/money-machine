@@ -10,6 +10,9 @@ from errors import InsufficientFundsError, MarketClosedError, InvalidSymbolError
 from brokers.alpaca_broker import AlpacaBroker
 from brokers.oanda_broker import OandaBroker
 from risk.risk_manager import RiskManager
+from backtest.report import render_results_html
+import json
+import os
 
 app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -305,6 +308,7 @@ input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;heigh
     <div class="dot {{ '' if bot_enabled else 'off' }}"></div>
     <span>{{ 'Bot running' if bot_enabled else 'Bot paused' }}</span>
   </div>
+  <a href="/backtest" style="color:#7ab8ff;font-size:12px;text-decoration:none;margin-left:12px">Backtest results &rarr;</a>
 </div>
 
 <div class="balance-section">
@@ -922,6 +926,27 @@ def webhook():
     except BrokerConnectionError as e:
         logging.error('Broker error: {}'.format(e))
         return jsonify({'error': str(e)}), 502
+
+
+
+@app.route('/backtest')
+def backtest_results():
+    if not session.get('auth'):
+        return redirect(url_for('login'))
+
+    results_path = os.path.join(os.path.dirname(__file__), 'backtest_results.json')
+    if not os.path.exists(results_path):
+        return (
+            "<p style='font-family:sans-serif;color:#eee;background:#0e0e12;padding:24px'>"
+            "No backtest results yet. Run <code>python -m backtest.runner</code> first, "
+            "then reload this page.</p>"
+        )
+
+    with open(results_path) as f:
+        results = json.load(f)
+
+    generated_at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(results_path)))
+    return render_results_html(results, generated_at=generated_at)
 
 
 @app.route('/health', methods=['GET'])

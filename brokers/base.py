@@ -55,5 +55,24 @@ class BrokerInterface(ABC):
         `timeframe` is a normalized string ('1m', '15m', '1h', '4h', '1d')
         that each broker maps to its own API's format internally — callers
         never need to know the broker-specific granularity syntax.
+
+        Built for the regime classifier's needs: a short, recent window
+        (default limit=100). For long historical stretches, use
+        get_historical_bars() instead.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_historical_bars(self, symbol, timeframe, start, end):
+        """
+        Return OHLCV bars for the half-open range [start, end), oldest
+        first, same dict shape as get_ohlcv (with 'time' as a real
+        datetime, not a string, on both brokers). `start`/`end` are
+        naive UTC datetimes.
+
+        Unlike get_ohlcv (last N bars, for live regime checks), this is
+        built for backtesting: it paginates internally so callers can
+        request months of history in a single call without worrying
+        about each broker API's own per-request bar cap.
         """
         raise NotImplementedError
