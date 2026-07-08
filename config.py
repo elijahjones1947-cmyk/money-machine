@@ -24,6 +24,11 @@ WEBHOOK_SECRET = require_env("WEBHOOK_SECRET")
 DASHBOARD_PASSWORD = require_env("DASHBOARD_PASSWORD")
 FLASK_SECRET = require_env("FLASK_SECRET")
 
+# Optional — Hermes (the chat agent) is fully disabled if this isn't
+# set, rather than the app crashing at startup. Get one from
+# console.anthropic.com and set it as a Railway env var when ready.
+ANTHROPIC_API_KEY = optional_env("ANTHROPIC_API_KEY")
+
 BROKER_CONFIG = {
     "alpaca": {
         "paper": {

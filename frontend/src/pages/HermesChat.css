@@ -1,0 +1,80 @@
+.hermes-page {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 140px);
+  max-width: 720px;
+}
+
+.hermes-messages {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 0;
+}
+
+.hermes-message {
+  max-width: 80%;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.hermes-message.user {
+  align-self: flex-end;
+  background: var(--accent-dim);
+  color: var(--text-primary);
+}
+
+.hermes-message.assistant {
+  align-self: flex-start;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+}
+
+.hermes-pending {
+  align-self: flex-start;
+  background: var(--warning);
+  color: #1a1400;
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  max-width: 80%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.hermes-pending-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.hermes-input-row {
+  display: flex;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.hermes-input-row input {
+  flex: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+}
+
+.hermes-not-configured {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
