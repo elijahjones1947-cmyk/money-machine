@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 import requests
 
 from brokers.base import BrokerInterface
@@ -17,6 +19,25 @@ _GRANULARITY_MAP = {
     "4h": "H4",
     "1d": "D",
 }
+
+# OANDA caps candle requests at 5000 per call regardless of granularity.
+_MAX_CANDLES_PER_REQUEST = 5000
+
+
+def _parse_oanda_time(s):
+    """
+    OANDA candle timestamps look like '2024-05-01T12:00:00.123456789Z'
+    (nanosecond precision, trailing Z). Python's datetime only handles
+    microseconds, so this truncates the fractional part before parsing.
+    Returned as a naive UTC datetime, consistent with the rest of the
+    codebase (no tzinfo attached anywhere else either).
+    """
+    s = s.rstrip("Z")
+    if "." in s:
+        base, frac = s.split(".")
+        s = "{}.{}".format(base, frac[:6])
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%f")
+    return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S")
 
 
 class OandaBroker(BrokerInterface):
@@ -144,6 +165,74 @@ class OandaBroker(BrokerInterface):
             return bars
         except requests.RequestException as e:
             raise BrokerConnectionError("OANDA connection error: {}".format(e))
+
+    def get_historical_bars(self, symbol, timeframe="1h", start=None, end=None):
+        """
+        Pulls OHLCV across [start, end) for backtesting, paginating in
+        _MAX_CANDLES_PER_REQUEST-candle pages via OANDA's from/to params
+        (months of 1h/1m history routinely exceeds a single request's cap).
+
+        Note this returns 'time' as a parsed datetime (unlike get_ohlcv,
+        which leaves OANDA's raw time string as-is) — the backtest engine
+        needs real datetimes to compare/sort against Alpaca's bars.
+        """
+        if start is None or end is None:
+            raise ValueError("get_historical_bars requires both start and end")
+        granularity = _GRANULARITY_MAP.get(timeframe)
+        if granularity is None:
+            raise ValueError("Unsupported timeframe: {}".format(timeframe))
+
+        url = "{}/v3/instruments/{}/candles".format(self.base_url, symbol)
+        all_bars = {}
+        cursor = start
+
+        while cursor < end:
+            params = {
+                "granularity": granularity,
+                "price": "M",
+                "from": cursor.strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
+                "to": end.strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
+                "count": _MAX_CANDLES_PER_REQUEST,
+            }
+            try:
+                resp = self.session.get(url, params=params, timeout=30)
+                data = resp.json()
+                if resp.status_code != 200:
+                    self._translate_error(resp.status_code, data, symbol)
+            except requests.RequestException as e:
+                raise BrokerConnectionError("OANDA connection error: {}".format(e))
+
+            candles = data.get("candles", [])
+            if not candles:
+                break
+
+            last_time_str = None
+            for c in candles:
+                if not c.get("complete", True):
+                    continue
+                mid = c["mid"]
+                all_bars[c["time"]] = {
+                    "time": _parse_oanda_time(c["time"]),
+                    "open": float(mid["o"]),
+                    "high": float(mid["h"]),
+                    "low": float(mid["l"]),
+                    "close": float(mid["c"]),
+                    "volume": float(c.get("volume", 0)),
+                }
+                last_time_str = c["time"]
+
+            if last_time_str is None:
+                break
+
+            last_dt = _parse_oanda_time(last_time_str)
+            if last_dt <= cursor:
+                break  # safety valve: no forward progress, stop
+            cursor = last_dt + timedelta(seconds=1)
+
+            if len(candles) < _MAX_CANDLES_PER_REQUEST:
+                break  # short page means we've reached `to`
+
+        return [all_bars[k] for k in sorted(all_bars.keys())]
 
     def _translate_error(self, status_code, data, symbol):
         """Map OANDA's error response into our standard error types."""
