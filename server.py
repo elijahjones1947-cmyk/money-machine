@@ -13,7 +13,14 @@ from risk.risk_manager import RiskManager
 import json
 import os
 
-app = Flask(__name__, static_folder='frontend/dist', static_url_path='')
+# static_folder=None: Flask's own auto-registered static route uses
+# the exact same '/<path:...>' pattern our SPA catch-all needs below,
+# and since it's registered first (at app construction), it was
+# winning every match and 404ing anything that wasn't a literal file
+# in frontend/dist (i.e. every client-side route like /dashboard).
+# Disabling it and doing file-serving ourselves in serve_spa() below
+# removes the conflict.
+app = Flask(__name__, static_folder=None)
 logging.basicConfig(level=logging.INFO)
 app.secret_key = config.FLASK_SECRET
 
@@ -583,10 +590,10 @@ def health():
 
 # --- React SPA catch-all -------------------------------------------------
 # Everything above is /api, /ui, /webhook, /health — real endpoints. Any
-# other path is a client-side route (React Router), so serve the built
-# SPA's index.html and let the browser's JS take over routing. Actual
-# static assets (JS/CSS bundles) are served automatically by Flask's
-# static_folder config (frontend/dist) before this ever gets hit.
+# other path is either a real static asset (JS/CSS bundle) or a
+# client-side route (React Router) — this one route handles both: serve
+# the file if it exists in frontend/dist, otherwise fall back to
+# index.html and let the browser's JS take over routing.
 _FRONTEND_DIST = os.path.join(os.path.dirname(__file__), 'frontend', 'dist')
 
 
