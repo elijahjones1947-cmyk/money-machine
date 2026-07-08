@@ -10,6 +10,7 @@ from errors import InsufficientFundsError, MarketClosedError, InvalidSymbolError
 from brokers.alpaca_broker import AlpacaBroker
 from brokers.oanda_broker import OandaBroker
 from risk.risk_manager import RiskManager
+from hermes import hermes_bp, init_hermes
 import json
 import os
 
@@ -45,6 +46,11 @@ oanda_broker = OandaBroker(
 BROKERS = {"stock": alpaca_broker, "forex": oanda_broker, "crypto": alpaca_broker}
 
 risk_manager = RiskManager(config.get_risk_config())
+
+# Hermes stays disabled (its routes return 503) if ANTHROPIC_API_KEY is
+# not set -- see hermes.py's init_hermes().
+init_hermes(alpaca_broker, oanda_broker, risk_manager)
+app.register_blueprint(hermes_bp)
 
 # --- Database setup -----------------------------------------------------
 # Fixes the long-standing "everything resets when Railway restarts" issue —

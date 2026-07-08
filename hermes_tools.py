@@ -1,0 +1,321 @@
+"""
+Hermes's tool belt: read tools (portfolio/positions/trades/regime/risk/
+config/market data) the agent can call freely, plus a small set of
+executor tools (pause/resume trading, adjust a risk limit) that
+actually change bot behavior.
+
+Executors are intentionally NOT run the moment the model asks for them —
+hermes.py stages them and makes the user confirm first (see the
+EXECUTOR_TOOL_NAMES set below and hermes.py's /api/hermes/confirm route).
+Read tools run immediately since they can't change anything.
+
+Every function here takes a HermesContext (brokers + risk_manager the
+live app already constructed in server.py) rather than importing server
+directly — avoids a circular import (server.py registers hermes_bp,
+hermes_bp's routes call these tools) and keeps this file testable on its
+own.
+"""
+
+import logging
+
+import config
+import db
+import state
+from backtest.strategy import DEFAULT_PARAMS as STRATEGY_PARAMS
+from errors import BrokerConnectionError
+
+
+class HermesContext:
+    """Bundles the live broker/risk_manager instances every tool needs.
+    Built once in server.py after the real brokers exist, passed into
+    every tool call — see hermes.py's init_hermes()."""
+
+    def __init__(self, alpaca_broker, oanda_broker, risk_manager):
+        self.alpaca_broker = alpaca_broker
+        self.oanda_broker = oanda_broker
+        self.risk_manager = risk_manager
+        self.brokers = {"stock": alpaca_broker, "forex": oanda_broker, "crypto": alpaca_broker}
+
+
+# --- Read tools -----------------------------------------------------------
+
+def get_portfolio_status(ctx, **_):
+    """Combined account info across both brokers (stock+crypto share the
+    Alpaca account; forex is OANDA)."""
+    try:
+        stock_acct = ctx.alpaca_broker.get_account_info()
+    except BrokerConnectionError as e:
+        stock_acct = {"error": str(e)}
+    try:
+        forex_acct = ctx.oanda_broker.get_account_info()
+    except BrokerConnectionError as e:
+        forex_acct = {"error": str(e)}
+
+    combined_equity = None
+    if "error" not in stock_acct and "error" not in forex_acct:
+        combined_equity = round(stock_acct["equity"] + forex_acct["equity"], 2)
+
+    return {
+        "trading_mode": config.TRADING_MODE,
+        "bot_enabled": state.bot_enabled,
+        "combined_equity": combined_equity,
+        "alpaca_account": stock_acct,
+        "oanda_account": forex_acct,
+    }
+
+
+def get_open_positions(ctx, **_):
+    """Open positions across both brokers, tagged by asset class."""
+    positions = []
+    try:
+        for p in ctx.alpaca_broker.get_positions():
+            ac = "crypto" if "/" in p.symbol else "stock"
+            positions.append({
+                "symbol": p.symbol, "asset_class": ac, "qty": p.qty,
+                "avg_entry": float(p.avg_entry_price),
+                "current_price": float(p.current_price),
+                "unrealized_pl": round(float(p.unrealized_pl), 2),
+            })
+    except BrokerConnectionError as e:
+        logging.warning("Hermes: could not fetch Alpaca positions: {}".format(e))
+
+    try:
+        for p in ctx.oanda_broker.get_positions():
+            long_units = float(p.get("long", {}).get("units", 0))
+            short_units = float(p.get("short", {}).get("units", 0))
+            units = long_units if long_units != 0 else short_units
+            avg_price = p.get("long", {}).get("averagePrice") if long_units != 0 else p.get("short", {}).get("averagePrice")
+            unrealized = float(p.get("long", {}).get("unrealizedPL", 0)) + float(p.get("short", {}).get("unrealizedPL", 0))
+            positions.append({
+                "symbol": p["instrument"], "asset_class": "forex", "qty": units,
+                "avg_entry": float(avg_price or 0), "current_price": None,
+                "unrealized_pl": round(unrealized, 2),
+            })
+    except BrokerConnectionError as e:
+        logging.warning("Hermes: could not fetch OANDA positions: {}".format(e))
+
+    return {"positions": positions, "count": len(positions)}
+
+
+def get_trade_history(ctx, limit=20, **_):
+    """Recent executed trades, most recent first. Reads the same
+    in-memory trade_log the dashboard shows (not a separate store)."""
+    limit = min(int(limit or 20), 200)
+    trades = list(reversed(state.trade_log))[:limit]
+    return {"trades": trades, "returned": len(trades)}
+
+
+def get_market_regime(ctx, symbol=None, **_):
+    """Latest classified regime (trending/choppy/volatile) per watched
+    symbol, from the same classifier + Postgres table the dashboard's
+    Regime widget reads. Pass `symbol` to filter to one."""
+    results = []
+    for asset_class, symbols in state.watched_symbols.items():
+        for sym in symbols:
+            if symbol and sym != symbol:
+                continue
+            try:
+                r = db.get_latest_regime(sym)
+            except Exception:
+                r = None
+            results.append({
+                "symbol": sym, "asset_class": asset_class,
+                "regime": r["regime"] if r else "unknown",
+                "adx": float(r["adx"]) if r and r.get("adx") is not None else None,
+                "recorded_at": str(r["recorded_at"]) if r else None,
+            })
+    return {"regimes": results}
+
+
+def get_recent_signals(ctx, limit=20, **_):
+    """NOTE: there's no separate 'signal log' distinct from executed
+    trades in this codebase yet — every entry in trade_log IS a signal
+    that was acted on. Signals that got rejected (bot paused, risk
+    limit, duplicate, etc.) aren't currently logged anywhere, so this
+    can't show 'signals that fired but were rejected' — only ones that
+    executed. Flagging as a real gap, not pretending otherwise."""
+    limit = min(int(limit or 20), 200)
+    trades = list(reversed(state.trade_log))[:limit]
+    return {
+        "signals": trades,
+        "note": "Only executed signals are logged; rejected/ignored signals aren't tracked yet.",
+    }
+
+
+def get_risk_state(ctx, **_):
+    """Snapshot of the live RiskManager: per-asset-class halt status and
+    today's running P&L, plus the account-wide breaker."""
+    rm = ctx.risk_manager
+    return {
+        "account_halted": rm.account_halted,
+        "starting_equity_today": rm.starting_equity_today,
+        "per_asset_class": {
+            ac: {"trading_halted": rm.trading_halted[ac], "daily_pnl": round(rm.daily_pnl[ac], 2)}
+            for ac in rm.asset_classes
+        },
+    }
+
+
+def get_strategy_config(ctx, **_):
+    """Current risk config, regime thresholds, and the Higher High
+    Breakout strategy's parameters (same defaults the backtester uses)."""
+    return {
+        "risk_config": config.get_risk_config(),
+        "regime_config": config.get_regime_config(),
+        "strategy_params": STRATEGY_PARAMS,
+        "risk_percent": state.risk_percent,
+        "max_trades_per_day": state.max_trades_per_day,
+        "watched_symbols": state.watched_symbols,
+    }
+
+
+def get_asset_market_data(ctx, symbol, asset_class=None, timeframe="1h", bars=20, **_):
+    """Recent OHLCV bars for a symbol, via the same broker.get_ohlcv()
+    path the backtester/regime classifier use. Kept short (default 20
+    bars) since this feeds an LLM context window, not a chart."""
+    asset_class = asset_class or ("crypto" if "/" in symbol else "forex" if "_" in symbol else "stock")
+    broker = ctx.brokers.get(asset_class)
+    if broker is None:
+        return {"error": "unknown asset_class: {}".format(asset_class)}
+    bars = min(int(bars or 20), 200)
+    try:
+        data = broker.get_ohlcv(symbol, timeframe=timeframe, limit=bars)
+    except BrokerConnectionError as e:
+        return {"error": str(e)}
+    return {
+        "symbol": symbol, "asset_class": asset_class, "timeframe": timeframe,
+        "bars": [{"time": str(b["time"]), "open": b["open"], "high": b["high"],
+                   "low": b["low"], "close": b["close"], "volume": b["volume"]} for b in data],
+    }
+
+
+# Fixed proxy list for a first-cut "broad market" read — not
+# comprehensive, just enough to answer "how's the market doing overall"
+# without a real market-data-provider integration. Revisit if this
+# needs to be more precise (real sector/index feed) later.
+_BROAD_MARKET_SYMBOLS = {
+    "SPY": "S&P 500", "QQQ": "Nasdaq 100", "DIA": "Dow Jones",
+    "XLK": "Tech sector", "XLF": "Financials sector", "XLE": "Energy sector",
+}
+
+
+def get_broad_market_context(ctx, **_):
+    """Best-effort snapshot of major index/sector ETFs via Alpaca, as a
+    cheap proxy for 'how's the broader market doing' — not a real
+    macro/sector data feed. See _BROAD_MARKET_SYMBOLS for exactly what's
+    covered. Consider caching this if it gets called often (each call is
+    ~6 Alpaca requests)."""
+    out = []
+    for sym, label in _BROAD_MARKET_SYMBOLS.items():
+        try:
+            bars = ctx.alpaca_broker.get_ohlcv(sym, timeframe="1d", limit=2)
+            if len(bars) >= 2:
+                change_pct = round((bars[-1]["close"] - bars[-2]["close"]) / bars[-2]["close"] * 100, 2)
+            else:
+                change_pct = None
+            out.append({"symbol": sym, "label": label, "last_close": bars[-1]["close"] if bars else None, "day_change_pct": change_pct})
+        except BrokerConnectionError as e:
+            out.append({"symbol": sym, "label": label, "error": str(e)})
+    return {"snapshot": out}
+
+
+def get_upcoming_earnings(ctx, **_):
+    """Stub — no earnings calendar data source is wired up yet (matches
+    the dashboard's Earnings widget, also a stub). Needs a real
+    provider before this can answer anything."""
+    return {
+        "earnings": [],
+        "note": "No earnings calendar data source configured yet — this tool has nothing to report.",
+    }
+
+
+# --- Executor tools (STAGED, not run immediately — see hermes.py) --------
+
+def pause_trading(ctx, **_):
+    state.bot_enabled = False
+    try:
+        db.save_setting("bot_enabled", False)
+    except Exception as e:
+        logging.warning("Hermes: could not persist bot_enabled: {}".format(e))
+    return {"bot_enabled": False}
+
+
+def resume_trading(ctx, **_):
+    state.bot_enabled = True
+    try:
+        db.save_setting("bot_enabled", True)
+    except Exception as e:
+        logging.warning("Hermes: could not persist bot_enabled: {}".format(e))
+    return {"bot_enabled": True}
+
+
+def adjust_risk_limit(ctx, asset_class, risk_percent, **_):
+    """Sets state.risk_percent[asset_class] — the position-SIZING knob
+    (same one the dashboard's settings sliders control).
+
+    Clamped to the RiskManager's max_position_size_pct cap for this
+    asset class + mode: sizing above that cap is exactly the bug that
+    silently blocked every forex trade for 2 days (the dashboard slider
+    and the risk manager's validation cap could drift apart with no
+    warning). Rejecting out-of-range requests here closes that gap
+    rather than reproducing it through a new entry point.
+    """
+    if asset_class not in ("stock", "forex", "crypto"):
+        return {"error": "asset_class must be stock, forex, or crypto"}
+
+    risk_config = config.get_risk_config()
+    max_allowed_pct = risk_config[asset_class]["max_position_size_pct"] * 100
+    requested = float(risk_percent)
+
+    if requested <= 0:
+        return {"error": "risk_percent must be positive"}
+    if requested > max_allowed_pct:
+        return {
+            "error": "Requested {}% exceeds the risk manager's {:.1f}% cap for {} in {} mode — rejected, not clamped, so you decide whether to change the cap itself instead.".format(
+                requested, max_allowed_pct, asset_class, config.TRADING_MODE
+            )
+        }
+
+    state.risk_percent[asset_class] = requested
+    try:
+        db.save_setting("risk_percent", state.risk_percent)
+    except Exception as e:
+        logging.warning("Hermes: could not persist risk_percent: {}".format(e))
+    return {"asset_class": asset_class, "risk_percent": requested}
+
+
+EXECUTOR_TOOL_NAMES = {"pause_trading", "resume_trading", "adjust_risk_limit"}
+
+TOOL_FUNCTIONS = {
+    "get_portfolio_status": get_portfolio_status,
+    "get_open_positions": get_open_positions,
+    "get_trade_history": get_trade_history,
+    "get_market_regime": get_market_regime,
+    "get_recent_signals": get_recent_signals,
+    "get_risk_state": get_risk_state,
+    "get_strategy_config": get_strategy_config,
+    "get_asset_market_data": get_asset_market_data,
+    "get_broad_market_context": get_broad_market_context,
+    "get_upcoming_earnings": get_upcoming_earnings,
+    "pause_trading": pause_trading,
+    "resume_trading": resume_trading,
+    "adjust_risk_limit": adjust_risk_limit,
+}
+
+# Anthropic tool-use schemas. Kept in the same file as the implementations
+# so the two can never drift out of sync with each other.
+TOOL_SCHEMAS = [
+    {"name": "get_portfolio_status", "description": "Get combined account/equity status across both brokers (Alpaca for stock+crypto, OANDA for forex), plus whether the bot is currently enabled.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_open_positions", "description": "Get all currently open positions across both brokers, tagged by asset class.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_trade_history", "description": "Get recent executed trades, most recent first.", "input_schema": {"type": "object", "properties": {"limit": {"type": "integer", "description": "Max trades to return (default 20, max 200)"}}}},
+    {"name": "get_market_regime", "description": "Get the latest classified market regime (trending/choppy/volatile) for watched symbols.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string", "description": "Filter to one symbol (optional)"}}}},
+    {"name": "get_recent_signals", "description": "Get recent trade signals that were acted on (note: only executed signals are tracked, not rejected ones).", "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
+    {"name": "get_risk_state", "description": "Get the live risk manager's halt status per asset class and today's running P&L.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_strategy_config", "description": "Get the current risk config, regime thresholds, strategy parameters, and watched symbols.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_asset_market_data", "description": "Get recent OHLCV price bars for a specific symbol.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}, "asset_class": {"type": "string", "enum": ["stock", "forex", "crypto"]}, "timeframe": {"type": "string", "enum": ["1m", "5m", "15m", "1h", "4h", "1d"]}, "bars": {"type": "integer"}}, "required": ["symbol"]}},
+    {"name": "get_broad_market_context", "description": "Get a snapshot of major index/sector ETFs (SPY, QQQ, DIA, and key sector ETFs) as a proxy for overall market conditions.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_upcoming_earnings", "description": "Get upcoming earnings dates for watched symbols. Currently returns nothing — no data source configured yet.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "pause_trading", "description": "EXECUTOR (requires user confirmation): pause the bot — blocks all new automated trades until resumed.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "resume_trading", "description": "EXECUTOR (requires user confirmation): resume the bot after a pause.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "adjust_risk_limit", "description": "EXECUTOR (requires user confirmation): change the position-sizing risk percent for an asset class. Rejected if it would exceed the risk manager's hard cap for that asset class.", "input_schema": {"type": "object", "properties": {"asset_class": {"type": "string", "enum": ["stock", "forex", "crypto"]}, "risk_percent": {"type": "number"}}, "required": ["asset_class", "risk_percent"]}},
+]
