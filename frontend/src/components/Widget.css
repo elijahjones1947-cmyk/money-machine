@@ -1,0 +1,87 @@
+.widget {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+
+.widget-link {
+  display: block;
+  height: 100%;
+}
+
+.widget-link:hover .widget {
+  border-color: var(--accent);
+  box-shadow: var(--shadow);
+}
+
+.widget-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.widget-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.widget-drag-handle {
+  cursor: grab;
+  color: var(--text-muted);
+  font-size: 14px;
+  padding: 2px 6px;
+  line-height: 1;
+}
+
+.widget-drag-handle:active {
+  cursor: grabbing;
+}
+
+.widget-body {
+  flex: 1;
+  padding: 14px;
+  overflow: auto;
+}
+
+/* Edit ("jiggle") mode: every widget wobbles gently so it reads as
+   "these are movable" — handles/tray only render in this mode too. */
+@keyframes widget-wobble {
+  0% { transform: rotate(-0.6deg); }
+  50% { transform: rotate(0.6deg); }
+  100% { transform: rotate(-0.6deg); }
+}
+
+.widget-shell.edit-mode .widget {
+  animation: widget-wobble 0.28s infinite ease-in-out;
+  border-color: var(--border);
+}
+
+.widget-remove-btn {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--danger);
+  color: #fff;
+  border: 2px solid var(--bg);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
