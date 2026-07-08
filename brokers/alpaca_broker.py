@@ -149,20 +149,25 @@ class AlpacaBroker(BrokerInterface):
         while chunk_start < end:
             chunk_end = min(chunk_start + timedelta(days=_HISTORICAL_CHUNK_DAYS), end)
             try:
+                # Alpaca's API requires RFC3339 (a timezone designator is
+                # mandatory) — plain .isoformat() on our naive UTC datetimes
+                # omits it and gets rejected, so we append 'Z' explicitly.
+                start_str = chunk_start.isoformat() + "Z"
+                end_str = chunk_end.isoformat() + "Z"
                 if is_crypto:
                     bars = self.client.get_crypto_bars(
                         symbol,
                         tf,
-                        start=chunk_start.isoformat(),
-                        end=chunk_end.isoformat(),
+                        start=start_str,
+                        end=end_str,
                         limit=10000,
                     )
                 else:
                     bars = self.client.get_bars(
                         symbol,
                         tf,
-                        start=chunk_start.isoformat(),
-                        end=chunk_end.isoformat(),
+                        start=start_str,
+                        end=end_str,
                         limit=10000,
                     )
                 df = bars.df
