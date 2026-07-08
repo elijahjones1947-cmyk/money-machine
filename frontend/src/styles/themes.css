@@ -1,0 +1,54 @@
+/* Design tokens as CSS variables, one named set per theme. The font is
+   locked here as a one-time setup (--font-family), never swapped at
+   runtime — only the theme's color tokens are runtime-toggleable via
+   the data-theme attribute on <html>. These two are starter poles per
+   the design brief: an aggressive neon-on-black "terminal/hacker" feel
+   and a soft purple-gradient "consumer fintech" feel. Real palette
+   names/values TBD once real mobile UI references are shared — treat
+   these as placeholders that are easy to swap wholesale later. */
+
+:root {
+  --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+}
+
+[data-theme='neon'] {
+  --bg: #05070a;
+  --bg-elevated: #0d1117;
+  --bg-card: #10151c;
+  --border: #1e2733;
+  --text-primary: #eafff2;
+  --text-secondary: #7c8b9a;
+  --text-muted: #4a5561;
+  --accent: #39ff8f;
+  --accent-dim: #39ff8f26;
+  --danger: #ff4d6d;
+  --danger-dim: #ff4d6d26;
+  --warning: #ffce54;
+  --shadow: 0 8px 30px rgba(57, 255, 143, 0.06);
+}
+
+[data-theme='soft'] {
+  --bg: #17141f;
+  --bg-elevated: #1f1b2c;
+  --bg-card: #262138;
+  --border: #352f47;
+  --text-primary: #f4f1fb;
+  --text-secondary: #a79dc4;
+  --text-muted: #6d6488;
+  --accent: #b388ff;
+  --accent-dim: #b388ff26;
+  --danger: #ff6f9c;
+  --danger-dim: #ff6f9c26;
+  --warning: #ffd479;
+  --shadow: 0 8px 30px rgba(179, 136, 255, 0.12);
+}
+
+body {
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-family);
+}

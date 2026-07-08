@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for
+from flask import Flask, request, jsonify, session, send_from_directory
 import logging, time, datetime, math
 
 import config
@@ -10,11 +10,10 @@ from errors import InsufficientFundsError, MarketClosedError, InvalidSymbolError
 from brokers.alpaca_broker import AlpacaBroker
 from brokers.oanda_broker import OandaBroker
 from risk.risk_manager import RiskManager
-from backtest.report import render_results_html
 import json
 import os
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='frontend/dist', static_url_path='')
 logging.basicConfig(level=logging.INFO)
 app.secret_key = config.FLASK_SECRET
 
@@ -179,458 +178,32 @@ def check_daily_rollover():
             risk_manager.reset_daily(None)
 
 
-# --- HTML templates -------------------------------------------------------
-
-LOGIN_HTML = '''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Rent Generator</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif}
-.logo{color:#00d64f;font-size:32px;font-weight:700;letter-spacing:-1px;margin-bottom:8px}
-.sub{color:#555;font-size:14px;margin-bottom:48px}
-.box{width:320px}
-input{width:100%;background:#111;border:1.5px solid #222;color:#fff;padding:16px;border-radius:14px;margin-bottom:12px;font-size:16px;outline:none;transition:border .2s}
-input:focus{border-color:#00d64f}
-button{width:100%;background:#00d64f;color:#000;border:none;padding:16px;border-radius:14px;font-size:16px;font-weight:700;cursor:pointer;transition:opacity .2s}
-button:hover{opacity:.9}
-.error{color:#ff4444;font-size:13px;text-align:center;margin-bottom:12px}
-</style></head>
-<body>
-<div class="logo">Rent Generator</div>
-<div class="sub">Trading Bot Dashboard</div>
-<div class="box">
-{% if error %}<div class="error">Wrong password. Try again.</div>{% endif %}
-<form method="POST">
-<input type="password" name="password" placeholder="Password" autofocus>
-<button type="submit">Sign in</button>
-</form>
-</div>
-</body></html>'''
-
-DASHBOARD_HTML = '''<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Rent Generator</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",sans-serif;padding:24px;max-width:900px;margin:0 auto}
-.header{display:flex;align-items:center;justify-content:space-between;margin-bottom:32px}
-.logo{color:#00d64f;font-size:22px;font-weight:700;letter-spacing:-0.5px}
-.mode-pill{display:inline-block;background:#222;color:#aaa;font-size:11px;padding:3px 8px;border-radius:10px;margin-left:8px;vertical-align:middle;text-transform:uppercase}
-.mode-pill.live{background:#ff444422;color:#ff4444}
-.status-pill{display:flex;align-items:center;gap:6px;background:#111;padding:8px 14px;border-radius:20px;font-size:13px}
-.dot{width:8px;height:8px;border-radius:50%;background:#00d64f}
-.dot.off{background:#ff4444}
-.balance-section{text-align:center;margin-bottom:20px}
-.balance-label{color:#555;font-size:14px;margin-bottom:6px}
-.balance-amount{font-size:52px;font-weight:700;letter-spacing:-2px;color:#fff}
-.balance-pnl{font-size:18px;margin-top:4px}
-.balance-pnl.up{color:#00d64f}
-.balance-pnl.down{color:#ff4444}
-.asset-split{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px}
-.asset-card{background:#111;border-radius:16px;padding:16px;text-align:center}
-.asset-card .name{color:#555;font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
-.asset-card .val{font-size:20px;font-weight:700}
-.asset-card .halted{color:#ff4444;font-size:11px;margin-top:4px;font-weight:600}
-.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-bottom:16px}
-.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
-.card{background:#111;border-radius:20px;padding:20px}
-.card-label{color:#555;font-size:12px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
-.card-value{font-size:24px;font-weight:700}
-.card-value.green{color:#00d64f}
-.card-value.red{color:#ff4444}
-.card-value.white{color:#fff}
-.section-title{color:#555;font-size:12px;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px;margin-top:28px}
-.position-card{background:#111;border-radius:20px;padding:20px;margin-bottom:16px;border:1.5px solid #00d64f22}
-.position-empty{border-color:#222;color:#444;font-size:14px}
-.position-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
-.pos-label{color:#555;font-size:13px}
-.pos-val{font-size:16px;font-weight:600}
-.chart-card{background:#111;border-radius:20px;padding:20px;margin-bottom:16px}
-.trade-list{background:#111;border-radius:20px;overflow:hidden;margin-bottom:16px}
-.trade-row{display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid #1a1a1a}
-.trade-row:last-child{border-bottom:none}
-.trade-left{display:flex;align-items:center;gap:12px}
-.badge{padding:4px 10px;border-radius:20px;font-size:11px;font-weight:700;text-transform:uppercase}
-.badge.buy{background:#00d64f22;color:#00d64f}
-.badge.sell{background:#ff444422;color:#ff4444}
-.asset-badge{padding:3px 8px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase;background:#2a2a2a;color:#999}
-.regime-badge{padding:3px 8px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase}
-.regime-badge.trending{background:#00d64f22;color:#00d64f}
-.regime-badge.volatile{background:#ff9d0022;color:#ff9d00}
-.regime-badge.choppy{background:#4488ff22;color:#4488ff}
-.regime-badge.unknown{background:#2a2a2a;color:#666}
-.regime-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:16px}
-.regime-card{background:#111;border-radius:14px;padding:14px;text-align:center}
-.regime-card .rsym{font-size:13px;font-weight:600;margin-bottom:6px}
-.trade-sym{font-size:15px;font-weight:600}
-.trade-detail{color:#555;font-size:12px;margin-top:2px}
-.trade-pnl{font-size:15px;font-weight:700}
-.trade-pnl.gain{color:#00d64f}
-.trade-pnl.loss{color:#ff4444}
-.trade-pnl.neutral{color:#555}
-.controls{background:#111;border-radius:20px;padding:20px;margin-bottom:16px}
-.control-row{display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid #1a1a1a}
-.control-row:last-child{border-bottom:none}
-.control-label{font-size:14px;color:#ccc}
-.control-sub{font-size:12px;color:#555;margin-top:2px}
-input[type=range]{-webkit-appearance:none;width:120px;height:4px;background:#222;border-radius:2px;outline:none}
-input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:18px;height:18px;background:#00d64f;border-radius:50%;cursor:pointer}
-.range-val{color:#00d64f;font-size:14px;font-weight:600;min-width:40px;text-align:right}
-.kill-btn{background:#ff444420;color:#ff4444;border:1.5px solid #ff444440;padding:10px 20px;border-radius:12px;font-size:14px;font-weight:600;cursor:pointer;width:100%;margin-top:12px;transition:background .2s}
-.kill-btn:hover{background:#ff444440}
-.kill-btn.active{background:#00d64f20;color:#00d64f;border-color:#00d64f40}
-.watchlist{background:#111;border-radius:20px;padding:20px;margin-bottom:16px}
-.watch-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid #1a1a1a}
-.watch-row:last-child{border-bottom:none}
-.watch-sym{font-size:15px;font-weight:600}
-.watch-price{color:#00d64f;font-size:15px;font-weight:600}
-.add-sym{display:flex;gap:8px;margin-top:12px}
-.add-sym input{flex:1;background:#1a1a1a;border:1.5px solid #222;color:#fff;padding:10px 14px;border-radius:12px;font-size:14px;outline:none}
-.add-sym input:focus{border-color:#00d64f}
-.add-sym button{background:#00d64f;color:#000;border:none;padding:10px 16px;border-radius:12px;font-size:14px;font-weight:700;cursor:pointer}
-.manual-btns{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px}
-.buy-btn{background:#00d64f20;color:#00d64f;border:1.5px solid #00d64f40;padding:12px;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;transition:background .2s}
-.buy-btn:hover{background:#00d64f40}
-.sell-btn{background:#ff444420;color:#ff4444;border:1.5px solid #ff444440;padding:12px;border-radius:14px;font-size:14px;font-weight:700;cursor:pointer;transition:background .2s}
-.sell-btn:hover{background:#ff444440}
-.sym-input{width:100%;background:#1a1a1a;border:1.5px solid #222;color:#fff;padding:10px 14px;border-radius:12px;font-size:14px;outline:none;margin-bottom:8px}
-.sym-input:focus{border-color:#00d64f}
-.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#00d64f;color:#000;padding:12px 24px;border-radius:14px;font-weight:700;font-size:14px;opacity:0;transition:opacity .3s;z-index:999}
-.empty{color:#444;font-size:14px;padding:12px 0;text-align:center}
-</style>
-</head>
-<body>
-<div class="header">
-  <div class="logo">Rent Generator <span class="mode-pill {{ 'live' if trading_mode == 'live' else '' }}">{{ trading_mode }}</span></div>
-  <div class="status-pill">
-    <div class="dot {{ '' if bot_enabled else 'off' }}"></div>
-    <span>{{ 'Bot running' if bot_enabled else 'Bot paused' }}</span>
-  </div>
-  <a href="/backtest" style="color:#7ab8ff;font-size:12px;text-decoration:none;margin-left:12px">Backtest results &rarr;</a>
-</div>
-
-<div class="balance-section">
-  <div class="balance-label">Combined portfolio value</div>
-  <div class="balance-amount">${{ combined_equity }}</div>
-</div>
-
-<div class="asset-split">
-  <div class="asset-card">
-    <div class="name">Stocks + Crypto (Alpaca)</div>
-    <div class="val">${{ stock_account.equity }}</div>
-    {% if stock_halted %}<div class="halted">⛔ stocks halted</div>{% endif %}
-    {% if crypto_halted %}<div class="halted">⛔ crypto halted</div>{% endif %}
-  </div>
-  <div class="asset-card">
-    <div class="name">Forex (OANDA)</div>
-    <div class="val">${{ forex_account.equity }}</div>
-    {% if forex_halted %}<div class="halted">⛔ halted today</div>{% endif %}
-  </div>
-</div>
-<div style="text-align:center;color:#444;font-size:11px;margin-top:-16px;margin-bottom:20px">Stocks and crypto share one Alpaca balance — not two separate pools</div>
-
-{% if account_halted %}
-<div class="card" style="border:1.5px solid #ff444460;margin-bottom:16px;text-align:center;color:#ff4444;font-weight:700">
-  🚨 ACCOUNT-WIDE HALT ACTIVE — all trading stopped for today
-</div>
-{% endif %}
-
-<div class="grid3">
-  <div class="card">
-    <div class="card-label">Trades today</div>
-    <div class="card-value white">{{ trades_today.stock + trades_today.forex + trades_today.crypto }}</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Win rate</div>
-    <div class="card-value {{ 'green' if win_rate >= 50 else 'red' }}">{{ win_rate }}%</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Open positions</div>
-    <div class="card-value white">{{ positions|length }}</div>
-  </div>
-</div>
-
-<div class="stats-grid">
-  <div class="card">
-    <div class="card-label">Avg gain</div>
-    <div class="card-value green">${{ avg_gain }}</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Avg loss</div>
-    <div class="card-value red">-${{ avg_loss }}</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Best trade</div>
-    <div class="card-value green">${{ best_trade }}</div>
-  </div>
-  <div class="card">
-    <div class="card-label">Worst trade</div>
-    <div class="card-value red">-${{ worst_trade }}</div>
-  </div>
-</div>
-
-<div class="section-title">Market regime</div>
-<div class="regime-grid">
-  {% for r in regimes %}
-  <div class="regime-card">
-    <div class="rsym">{{ r.symbol }} <span class="asset-badge">{{ r.asset_class }}</span></div>
-    <span class="regime-badge {{ r.regime }}">{{ r.regime }}</span>
-  </div>
-  {% endfor %}
-  {% if not regimes %}<div class="empty">No watched symbols yet</div>{% endif %}
-</div>
-
-<div class="section-title">Open positions</div>
-{% if positions %}
-  {% for position in positions %}
-  <div class="position-card">
-    <div class="position-row"><span class="pos-label">Symbol</span><span class="pos-val" style="color:#00d64f">{{ position.symbol }} <span class="asset-badge">{{ position.asset_class }}</span></span></div>
-    <div class="position-row"><span class="pos-label">Size</span><span class="pos-val">{{ position.qty }}</span></div>
-    <div class="position-row"><span class="pos-label">Avg entry</span><span class="pos-val">${{ position.avg_entry }}</span></div>
-    <div class="position-row"><span class="pos-label">Current price</span><span class="pos-val">${{ position.current_price }}</span></div>
-    <div class="position-row">
-      <span class="pos-label">Unrealized P&L</span>
-      <span class="pos-val" style="color:{{ '#00d64f' if position.unrealized_pl >= 0 else '#ff4444' }}">${{ position.unrealized_pl }}</span>
-    </div>
-  </div>
-  {% endfor %}
-{% else %}
-<div class="position-card position-empty">No open positions</div>
-{% endif %}
-
-<div class="section-title">Equity curve (combined)</div>
-<div class="chart-card">
-  <canvas id="equityChart" height="80"></canvas>
-</div>
-
-<div class="section-title">Watchlist — stocks</div>
-<div class="watchlist">
-  {% for sym in watched_symbols.stock %}
-  <div class="watch-row"><span class="watch-sym">{{ sym }}</span><span class="watch-price" id="price-{{ sym }}">—</span></div>
-  {% endfor %}
-  {% if not watched_symbols.stock %}<div class="empty">No symbols added</div>{% endif %}
-  <div class="add-sym">
-    <input type="text" id="newStockSym" placeholder="Add stock symbol (e.g. TSLA)" maxlength="8">
-    <button onclick="addSymbol('stock')">Add</button>
-  </div>
-</div>
-
-<div class="section-title">Watchlist — forex</div>
-<div class="watchlist">
-  {% for sym in watched_symbols.forex %}
-  <div class="watch-row"><span class="watch-sym">{{ sym }}</span><span class="watch-price" id="price-{{ sym }}">—</span></div>
-  {% endfor %}
-  {% if not watched_symbols.forex %}<div class="empty">No symbols added</div>{% endif %}
-  <div class="add-sym">
-    <input type="text" id="newForexSym" placeholder="Add forex pair (e.g. GBP_USD)" maxlength="8">
-    <button onclick="addSymbol('forex')">Add</button>
-  </div>
-</div>
-
-<div class="section-title">Watchlist — crypto</div>
-<div class="watchlist">
-  {% for sym in watched_symbols.crypto %}
-  <div class="watch-row"><span class="watch-sym">{{ sym }}</span><span class="watch-price" id="price-{{ sym }}">—</span></div>
-  {% endfor %}
-  {% if not watched_symbols.crypto %}<div class="empty">No symbols added</div>{% endif %}
-  <div class="add-sym">
-    <input type="text" id="newCryptoSym" placeholder="Add crypto pair (e.g. ETH/USD)" maxlength="10">
-    <button onclick="addSymbol('crypto')">Add</button>
-  </div>
-</div>
-
-<div class="section-title">Manual trade</div>
-<div class="card">
-  <input type="text" class="sym-input" id="manualSym" placeholder="Symbol (e.g. AAPL, EUR_USD, or BTC/USD)">
-  <div class="manual-btns">
-    <button class="buy-btn" onclick="manualTrade('buy')">Buy</button>
-    <button class="sell-btn" onclick="manualTrade('sell')">Sell</button>
-  </div>
-</div>
-
-<div class="section-title">Bot controls</div>
-<div class="controls">
-  <div class="control-row">
-    <div>
-      <div class="control-label">Stock risk per trade</div>
-      <div class="control-sub">% of combined equity per signal</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <input type="range" min="1" max="50" value="{{ risk_percent.stock }}" id="stockRiskSlider" oninput="updateRisk('stock', this.value)">
-      <span class="range-val" id="stockRiskVal">{{ risk_percent.stock }}%</span>
-    </div>
-  </div>
-  <div class="control-row">
-    <div>
-      <div class="control-label">Forex risk per trade</div>
-      <div class="control-sub">% of combined equity per signal</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <input type="range" min="1" max="50" value="{{ risk_percent.forex }}" id="forexRiskSlider" oninput="updateRisk('forex', this.value)">
-      <span class="range-val" id="forexRiskVal">{{ risk_percent.forex }}%</span>
-    </div>
-  </div>
-  <div class="control-row">
-    <div>
-      <div class="control-label">Max stock trades/day</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <input type="range" min="1" max="50" value="{{ max_trades_per_day.stock }}" id="stockMaxSlider" oninput="updateMaxTrades('stock', this.value)">
-      <span class="range-val" id="stockMaxVal">{{ max_trades_per_day.stock }}</span>
-    </div>
-  </div>
-  <div class="control-row">
-    <div>
-      <div class="control-label">Max forex trades/day</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <input type="range" min="1" max="50" value="{{ max_trades_per_day.forex }}" id="forexMaxSlider" oninput="updateMaxTrades('forex', this.value)">
-      <span class="range-val" id="forexMaxVal">{{ max_trades_per_day.forex }}</span>
-    </div>
-  </div>
-  <div class="control-row">
-    <div>
-      <div class="control-label">Crypto risk per trade</div>
-      <div class="control-sub">% of combined equity per signal (kept low — crypto is volatile)</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <input type="range" min="1" max="50" value="{{ risk_percent.crypto }}" id="cryptoRiskSlider" oninput="updateRisk('crypto', this.value)">
-      <span class="range-val" id="cryptoRiskVal">{{ risk_percent.crypto }}%</span>
-    </div>
-  </div>
-  <div class="control-row">
-    <div>
-      <div class="control-label">Max crypto trades/day</div>
-    </div>
-    <div style="display:flex;align-items:center;gap:10px">
-      <input type="range" min="1" max="50" value="{{ max_trades_per_day.crypto }}" id="cryptoMaxSlider" oninput="updateMaxTrades('crypto', this.value)">
-      <span class="range-val" id="cryptoMaxVal">{{ max_trades_per_day.crypto }}</span>
-    </div>
-  </div>
-  <button class="kill-btn {{ 'active' if not bot_enabled else '' }}" onclick="toggleBot()">
-    {{ 'Resume bot' if not bot_enabled else 'Kill switch — pause all trading' }}
-  </button>
-</div>
-
-<div class="section-title">Trade history</div>
-<div class="trade-list">
-  {% if trades %}
-    {% for trade in trades|reverse %}
-    <div class="trade-row">
-      <div class="trade-left">
-        <span class="badge {{ trade.action }}">{{ trade.action }}</span>
-        <div>
-          <div class="trade-sym">{{ trade.symbol }} <span class="asset-badge">{{ trade.asset_class }}</span> {% if trade.regime %}<span class="regime-badge {{ trade.regime }}">{{ trade.regime }}</span>{% endif %}</div>
-          <div class="trade-detail">{{ trade.qty }} @ ${{ trade.price }} · {{ trade.time }}</div>
-        </div>
-      </div>
-      <div class="trade-pnl {% if trade.pnl is not none %}{% if trade.pnl > 0 %}gain{% elif trade.pnl < 0 %}loss{% else %}neutral{% endif %}{% else %}neutral{% endif %}">
-        {% if trade.pnl is not none %}
-          {% if trade.pnl > 0 %}+${{ "%.2f" % trade.pnl }}{% elif trade.pnl < 0 %}-${{ "%.2f" % (trade.pnl * -1) }}{% else %}$0.00{% endif %}
-        {% else %}—{% endif %}
-      </div>
-    </div>
-    {% endfor %}
-  {% else %}
-  <div class="empty" style="padding:20px">No trades yet</div>
-  {% endif %}
-</div>
-
-<div id="toast" class="toast"></div>
-
-<script>
-const labels = {{ eq_times|tojson }};
-const data = {{ eq_values|tojson }};
-
-if(data.length > 1){
-  new Chart(document.getElementById('equityChart'), {
-    type:'line',
-    data:{labels:labels,datasets:[{label:'Equity',data:data,borderColor:'#00d64f',backgroundColor:'rgba(0,214,79,0.05)',borderWidth:2,pointRadius:2,tension:0.4,fill:true}]},
-    options:{responsive:true,plugins:{legend:{display:false}},scales:{x:{ticks:{color:'#444',font:{size:11}},grid:{color:'#1a1a1a'}},y:{ticks:{color:'#444',font:{size:11},callback:v=>'$'+v.toFixed(0)},grid:{color:'#1a1a1a'}}}}
-  });
-} else {
-  document.getElementById('equityChart').parentElement.innerHTML = '<div class="empty" style="padding:20px">Chart builds as trades come in</div>';
-}
-
-function showToast(msg, color){
-  color = color || '#00d64f';
-  const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.style.background = color;
-  t.style.color = color === '#00d64f' ? '#000' : '#fff';
-  t.style.opacity = '1';
-  setTimeout(function(){t.style.opacity='0';}, 3000);
-}
-
-function updateRisk(assetClass, v){
-  document.getElementById(assetClass+'RiskVal').textContent = v+'%';
-  fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_class:assetClass, risk_percent:parseInt(v)})});
-}
-
-function updateMaxTrades(assetClass, v){
-  document.getElementById(assetClass+'MaxVal').textContent = v;
-  fetch('/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({asset_class:assetClass, max_trades_per_day:parseInt(v)})});
-}
-
-function toggleBot(){
-  fetch('/toggle_bot',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
-    showToast(d.enabled ? 'Bot resumed' : 'Bot paused', d.enabled ? '#00d64f' : '#ff4444');
-    setTimeout(function(){location.reload();}, 1000);
-  });
-}
-
-function addSymbol(assetClass){
-  const inputMap = {stock: 'newStockSym', forex: 'newForexSym', crypto: 'newCryptoSym'};
-  const sym = document.getElementById(inputMap[assetClass]).value.toUpperCase().trim();
-  if(!sym) return;
-  fetch('/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol:sym, asset_class:assetClass})})
-    .then(function(r){return r.json();}).then(function(d){
-      showToast(d.status === 'added' ? sym+' added' : 'Already in watchlist');
-      setTimeout(function(){location.reload();}, 1000);
-    });
-}
-
-function manualTrade(action){
-  const sym = document.getElementById('manualSym').value.toUpperCase().trim();
-  if(!sym){showToast('Enter a symbol first','#ff4444');return;}
-  if(!confirm('Place manual '+action.toUpperCase()+' for '+sym+'?')) return;
-  fetch('/webhook',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({secret:'{{ ws }}',action:action,symbol:sym,manual:true})})
-    .then(function(r){return r.json();}).then(function(d){
-      if(d.status === 'order placed') showToast(action.toUpperCase()+' '+d.qty+' '+sym);
-      else showToast(d.error || 'Error','#ff4444');
-      setTimeout(function(){location.reload();}, 2000);
-    });
-}
-
-setTimeout(function(){location.reload();}, 30000);
-</script>
-</body></html>'''
-
-
 # --- Routes -----------------------------------------------------------
 
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if request.method == 'POST':
-        if request.form.get('password') == DASHBOARD_PASSWORD:
-            session['auth'] = True
-            return redirect(url_for('dashboard'))
-        return render_template_string(LOGIN_HTML, error=True)
-    return render_template_string(LOGIN_HTML, error=False)
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    data = request.json or {}
+    if data.get('password') == DASHBOARD_PASSWORD:
+        session['auth'] = True
+        return jsonify({'status': 'ok'})
+    return jsonify({'error': 'invalid password'}), 401
 
 
-@app.route('/')
-def index():
-    return redirect(url_for('login'))
+@app.route('/api/logout', methods=['POST'])
+def api_logout():
+    session.clear()
+    return jsonify({'status': 'ok'})
 
 
-@app.route('/dashboard')
-def dashboard():
+@app.route('/api/session')
+def api_session():
+    return jsonify({'authenticated': bool(session.get('auth'))})
+
+
+@app.route('/api/dashboard')
+def api_dashboard():
     if not session.get('auth'):
-        return redirect(url_for('login'))
+        return jsonify({'error': 'unauthorized'}), 401
 
     check_daily_rollover()
 
@@ -715,29 +288,37 @@ def dashboard():
                 'regime': r['regime'] if r else 'unknown',
             })
 
-    return render_template_string(
-        DASHBOARD_HTML,
-        trading_mode=config.TRADING_MODE,
-        combined_equity='{:,.2f}'.format(combined_equity),
-        stock_account={'equity': '{:,.2f}'.format(stock_acct['equity'])},
-        forex_account={'equity': '{:,.2f}'.format(forex_acct['equity'])},
-        stock_halted=risk_manager.trading_halted['stock'],
-        forex_halted=risk_manager.trading_halted['forex'],
-        crypto_halted=risk_manager.trading_halted['crypto'],
-        account_halted=risk_manager.account_halted,
-        positions=positions,
-        trades=state.trade_log,
-        eq_times=state.equity_history['times'], eq_values=state.equity_history['values'],
-        watched_symbols=state.watched_symbols, bot_enabled=state.bot_enabled,
-        risk_percent=state.risk_percent, max_trades_per_day=state.max_trades_per_day,
-        trades_today=state.trades_today,
-        win_rate=win_rate, avg_gain=avg_gain, avg_loss=avg_loss,
-        best_trade=best_trade, worst_trade=worst_trade, ws=WEBHOOK_SECRET,
-        regimes=regimes,
-    )
+    return jsonify({
+        'trading_mode': config.TRADING_MODE,
+        'combined_equity': round(combined_equity, 2),
+        'stock_account': stock_acct,
+        'forex_account': forex_acct,
+        'risk_state': {
+            'stock_halted': risk_manager.trading_halted['stock'],
+            'forex_halted': risk_manager.trading_halted['forex'],
+            'crypto_halted': risk_manager.trading_halted['crypto'],
+            'account_halted': risk_manager.account_halted,
+        },
+        'positions': positions,
+        'trades': state.trade_log,
+        'equity_history': {
+            'times': state.equity_history['times'],
+            'values': state.equity_history['values'],
+        },
+        'watched_symbols': state.watched_symbols,
+        'bot_enabled': state.bot_enabled,
+        'risk_percent': state.risk_percent,
+        'max_trades_per_day': state.max_trades_per_day,
+        'trades_today': state.trades_today,
+        'trade_stats': {
+            'win_rate': win_rate, 'avg_gain': avg_gain, 'avg_loss': avg_loss,
+            'best_trade': best_trade, 'worst_trade': worst_trade,
+        },
+        'regimes': regimes,
+    })
 
 
-@app.route('/toggle_bot', methods=['POST'])
+@app.route('/api/toggle_bot', methods=['POST'])
 def toggle_bot():
     if not session.get('auth'):
         return jsonify({'error': 'unauthorized'}), 401
@@ -749,7 +330,7 @@ def toggle_bot():
     return jsonify({'enabled': state.bot_enabled})
 
 
-@app.route('/settings', methods=['POST'])
+@app.route('/api/settings', methods=['POST'])
 def settings():
     if not session.get('auth'):
         return jsonify({'error': 'unauthorized'}), 401
@@ -772,7 +353,7 @@ def settings():
     return jsonify({'status': 'updated'})
 
 
-@app.route('/watchlist', methods=['POST'])
+@app.route('/api/watchlist', methods=['POST'])
 def add_watchlist():
     if not session.get('auth'):
         return jsonify({'error': 'unauthorized'}), 401
@@ -793,13 +374,13 @@ def add_watchlist():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """External-facing route for TradingView alerts — requires the shared
+    WEBHOOK_SECRET, never exposed to the browser."""
     data = request.json
     if not data:
         return jsonify({'error': 'no data'}), 415
     if data.get('secret') != WEBHOOK_SECRET:
         return jsonify({'error': 'unauthorized'}), 401
-
-    check_daily_rollover()
 
     action = data.get('action')
     symbol = data.get('symbol')
@@ -808,7 +389,32 @@ def webhook():
     if symbol in ('{{TICKER}}', '{{ticker}}'):
         return jsonify({'error': 'invalid symbol'}), 400
 
-    is_manual = data.get('manual', False)
+    return _process_trade_signal(action, symbol, data.get('manual', False))
+
+
+@app.route('/api/manual_trade', methods=['POST'])
+def api_manual_trade():
+    """SPA-facing route for the dashboard's manual buy/sell buttons — gated
+    by the logged-in session instead, so the webhook secret never has to
+    reach the browser at all (the old Jinja dashboard used to embed it in
+    the page for this exact purpose)."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+    data = request.json or {}
+    action = data.get('action')
+    symbol = data.get('symbol')
+    if not action or not symbol:
+        return jsonify({'error': 'missing fields'}), 400
+    return _process_trade_signal(action, symbol, is_manual=True)
+
+
+def _process_trade_signal(action, symbol, is_manual):
+    """Shared by both /webhook (TradingView, secret-gated) and
+    /api/manual_trade (dashboard buttons, session-gated) — sizes, risk
+    checks, executes, and logs a trade signal identically regardless of
+    where it came from."""
+    check_daily_rollover()
+
     asset_class = asset_class_for_symbol(symbol)
     broker = BROKERS[asset_class]
 
@@ -929,29 +535,73 @@ def webhook():
 
 
 
-@app.route('/backtest')
-def backtest_results():
+@app.route('/api/backtest')
+def api_backtest():
     if not session.get('auth'):
-        return redirect(url_for('login'))
+        return jsonify({'error': 'unauthorized'}), 401
 
     results_path = os.path.join(os.path.dirname(__file__), 'backtest_results.json')
     if not os.path.exists(results_path):
-        return (
-            "<p style='font-family:sans-serif;color:#eee;background:#0e0e12;padding:24px'>"
-            "No backtest results yet. Run <code>python -m backtest.runner</code> first, "
-            "then reload this page.</p>"
-        )
+        return jsonify({'results': None, 'generated_at': None})
 
     with open(results_path) as f:
         results = json.load(f)
 
     generated_at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(results_path)))
-    return render_results_html(results, generated_at=generated_at)
+    return jsonify({'results': results, 'generated_at': generated_at})
+
+
+@app.route('/ui/layout', methods=['GET', 'POST'])
+def ui_layout():
+    """Persists the dashboard's widget grid layout (positions/sizes per
+    widget id) across devices and redeploys — same bot_settings key-value
+    store everything else in Settings already uses, just a new key."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+
+    if request.method == 'POST':
+        layout = request.json or {}
+        try:
+            db.save_setting('ui_layout', layout)
+        except Exception as e:
+            logging.warning('Could not persist ui_layout: {}'.format(e))
+            return jsonify({'error': 'failed to save layout'}), 500
+        return jsonify({'status': 'saved'})
+
+    try:
+        layout = db.get_setting('ui_layout', default=None)
+    except Exception as e:
+        logging.warning('Could not load ui_layout: {}'.format(e))
+        layout = None
+    return jsonify({'layout': layout})
 
 
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'running', 'mode': config.TRADING_MODE})
+
+
+# --- React SPA catch-all -------------------------------------------------
+# Everything above is /api, /ui, /webhook, /health — real endpoints. Any
+# other path is a client-side route (React Router), so serve the built
+# SPA's index.html and let the browser's JS take over routing. Actual
+# static assets (JS/CSS bundles) are served automatically by Flask's
+# static_folder config (frontend/dist) before this ever gets hit.
+_FRONTEND_DIST = os.path.join(os.path.dirname(__file__), 'frontend', 'dist')
+
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def serve_spa(path):
+    full_path = os.path.join(_FRONTEND_DIST, path)
+    if path and os.path.isfile(full_path):
+        return send_from_directory(_FRONTEND_DIST, path)
+    index_path = os.path.join(_FRONTEND_DIST, 'index.html')
+    if not os.path.exists(index_path):
+        return jsonify({
+            'error': 'Frontend not built yet. Run `npm run build` in frontend/.'
+        }), 503
+    return send_from_directory(_FRONTEND_DIST, 'index.html')
 
 
 if __name__ == '__main__':
