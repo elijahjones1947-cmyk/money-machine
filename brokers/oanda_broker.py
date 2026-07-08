@@ -187,11 +187,15 @@ class OandaBroker(BrokerInterface):
         cursor = start
 
         while cursor < end:
+            # OANDA rejects requests that mix 'count' with BOTH 'from'
+            # and 'to' ("'count' cannot be specified when 'to' and
+            # 'from' parameters are set") — so we page forward using
+            # 'from' + 'count' only, and cut candles off at `end`
+            # ourselves once a page runs past it.
             params = {
                 "granularity": granularity,
                 "price": "M",
                 "from": cursor.strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
-                "to": end.strftime("%Y-%m-%dT%H:%M:%S.000000000Z"),
                 "count": _MAX_CANDLES_PER_REQUEST,
             }
             try:
@@ -207,12 +211,17 @@ class OandaBroker(BrokerInterface):
                 break
 
             last_time_str = None
+            reached_end = False
             for c in candles:
+                candle_time = _parse_oanda_time(c["time"])
+                if candle_time >= end:
+                    reached_end = True
+                    break
                 if not c.get("complete", True):
                     continue
                 mid = c["mid"]
                 all_bars[c["time"]] = {
-                    "time": _parse_oanda_time(c["time"]),
+                    "time": candle_time,
                     "open": float(mid["o"]),
                     "high": float(mid["h"]),
                     "low": float(mid["l"]),
@@ -220,6 +229,9 @@ class OandaBroker(BrokerInterface):
                     "volume": float(c.get("volume", 0)),
                 }
                 last_time_str = c["time"]
+
+            if reached_end:
+                break
 
             if last_time_str is None:
                 break
