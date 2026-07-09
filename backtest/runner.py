@@ -24,7 +24,7 @@ from brokers.oanda_broker import OandaBroker
 from backtest.data import fetch_bars_for_backtest
 from backtest.engine import run_backtest
 from backtest.regime_tagging import tag_trades_with_regime
-from backtest.metrics import compute_metrics
+from backtest.metrics import compute_metrics, compute_equity_curve
 
 DEFAULT_TARGETS = [
     {"asset_class": "stock", "symbol": "AAPL", "timeframe": "1h"},
@@ -54,6 +54,7 @@ def run_one(broker, symbol, asset_class, timeframe, months_back):
     trades = run_backtest(bars)
     tagged = tag_trades_with_regime(trades, bars, config.get_regime_config(), asset_class)
     metrics = compute_metrics(tagged)
+    equity_curve = compute_equity_curve(tagged)
     return {
         "symbol": symbol,
         "asset_class": asset_class,
@@ -61,6 +62,7 @@ def run_one(broker, symbol, asset_class, timeframe, months_back):
         "bar_count": len(bars),
         "trades": tagged,
         "metrics": metrics,
+        "equity_curve": equity_curve,
     }
 
 

@@ -16,7 +16,9 @@ hermes_bp's routes call these tools) and keeps this file testable on its
 own.
 """
 
+import json
 import logging
+import os
 
 import config
 import db
@@ -219,6 +221,41 @@ def get_broad_market_context(ctx, **_):
     return {"snapshot": out}
 
 
+_BACKTEST_RESULTS_PATH = os.path.join(os.path.dirname(__file__), "backtest_results.json")
+
+
+def get_backtest_results(ctx, symbol=None, **_):
+    """Reads the same backtest_results.json the /api/backtest dashboard
+    route serves (written by `python -m backtest.runner`) — lets Hermes
+    answer questions like 'how did the strategy do in high-vol regimes
+    last backtest' against real numbers instead of guessing. Returns
+    metrics only (overall + by-regime), not the full trade list, to
+    keep this cheap on tokens; pass `symbol` to filter to one instrument."""
+    if not os.path.exists(_BACKTEST_RESULTS_PATH):
+        return {"results": None, "note": "No backtest has been run yet (backtest_results.json doesn't exist)."}
+
+    with open(_BACKTEST_RESULTS_PATH) as f:
+        results = json.load(f)
+
+    generated_at = None
+    try:
+        generated_at = str(os.path.getmtime(_BACKTEST_RESULTS_PATH))
+    except OSError:
+        pass
+
+    summarized = []
+    for r in results:
+        if symbol and r["symbol"] != symbol:
+            continue
+        summarized.append({
+            "symbol": r["symbol"], "asset_class": r["asset_class"],
+            "timeframe": r["timeframe"], "bar_count": r["bar_count"],
+            "metrics": r["metrics"],
+        })
+
+    return {"generated_at": generated_at, "results": summarized}
+
+
 def get_upcoming_earnings(ctx, **_):
     """Stub — no earnings calendar data source is wired up yet (matches
     the dashboard's Earnings widget, also a stub). Needs a real
@@ -296,6 +333,7 @@ TOOL_FUNCTIONS = {
     "get_strategy_config": get_strategy_config,
     "get_asset_market_data": get_asset_market_data,
     "get_broad_market_context": get_broad_market_context,
+    "get_backtest_results": get_backtest_results,
     "get_upcoming_earnings": get_upcoming_earnings,
     "pause_trading": pause_trading,
     "resume_trading": resume_trading,
@@ -314,6 +352,7 @@ TOOL_SCHEMAS = [
     {"name": "get_strategy_config", "description": "Get the current risk config, regime thresholds, strategy parameters, and watched symbols.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_asset_market_data", "description": "Get recent OHLCV price bars for a specific symbol.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}, "asset_class": {"type": "string", "enum": ["stock", "forex", "crypto"]}, "timeframe": {"type": "string", "enum": ["1m", "5m", "15m", "1h", "4h", "1d"]}, "bars": {"type": "integer"}}, "required": ["symbol"]}},
     {"name": "get_broad_market_context", "description": "Get a snapshot of major index/sector ETFs (SPY, QQQ, DIA, and key sector ETFs) as a proxy for overall market conditions.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_backtest_results", "description": "Get metrics (win rate, max drawdown, Sharpe) from the most recent backtest run, overall and broken out by market regime. Pass symbol to filter to one instrument.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}}}},
     {"name": "get_upcoming_earnings", "description": "Get upcoming earnings dates for watched symbols. Currently returns nothing — no data source configured yet.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "pause_trading", "description": "EXECUTOR (requires user confirmation): pause the bot — blocks all new automated trades until resumed.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "resume_trading", "description": "EXECUTOR (requires user confirmation): resume the bot after a pause.", "input_schema": {"type": "object", "properties": {}}},

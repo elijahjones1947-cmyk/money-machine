@@ -74,6 +74,28 @@ def _summarize(trades, initial_capital):
     }
 
 
+def compute_equity_curve(trades, initial_capital=10000.0):
+    """
+    Running equity curve over a trade sequence (already in chronological
+    order) — one point per trade close, plus a synthetic starting point
+    at initial_capital so the curve doesn't start mid-air. This is what
+    the dashboard's Backtest results page charts; kept separate from
+    compute_metrics() since not every caller needs the full point series
+    (e.g. summary widgets just want the scalar stats).
+
+    Returns a list of {"time": <exit_time>, "equity": <float>} dicts.
+    """
+    if not trades:
+        return [{"time": None, "equity": initial_capital}]
+
+    equity = initial_capital
+    curve = [{"time": trades[0]["entry_time"], "equity": equity}]
+    for t in trades:
+        equity += t["pnl_abs"]
+        curve.append({"time": t["exit_time"], "equity": round(equity, 2)})
+    return curve
+
+
 def compute_metrics(tagged_trades, initial_capital=10000.0):
     """
     tagged_trades: output of regime_tagging.tag_trades_with_regime()
