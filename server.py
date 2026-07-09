@@ -328,6 +328,7 @@ def api_dashboard():
             'best_trade': best_trade, 'worst_trade': worst_trade,
         },
         'regimes': regimes,
+        'risk_caps': config.get_risk_config(),
     })
 
 
