@@ -3,34 +3,53 @@ import { EquityCurveChart } from '../components/EquityCurveChart.jsx';
 
 const CURVE_COLORS = ['#39ff8f', '#7ab8ff', '#ffce54'];
 
+// Leads with LIVE performance (real trades) rather than the simulated
+// backtest, since that's the more current/actionable number day to
+// day -- the full backtest breakdown is one click away on the detail
+// page. Previously this only ever showed simulated results and was
+// largely redundant with the richer "Backtest & live performance"
+// page once that existed.
 export function BacktestWidget() {
   const { data, loading } = useBacktest();
 
   if (loading) return <div className="empty-state">Loading…</div>;
-  if (!data?.results) {
-    return <div className="empty-state">No backtest results yet — run the backtester and refresh.</div>;
-  }
+
+  const live = data?.live_performance;
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-      <div style={{ height: 60 }}>
-        <EquityCurveChart
-          height={60}
-          series={data.results.map((r, i) => ({
-            name: r.symbol,
-            color: CURVE_COLORS[i % CURVE_COLORS.length],
-            points: r.equity_curve || [],
-          }))}
-        />
-      </div>
-      {data.results.map((r) => (
-        <div key={r.symbol} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
-          <span>{r.symbol}</span>
-          <span style={{ color: r.metrics.overall.win_rate_pct >= 45 ? 'var(--accent)' : 'var(--text-secondary)' }}>
-            {r.metrics.overall.win_rate_pct}% win · {r.metrics.overall.trade_count} trades
+      {live && live.trade_count > 0 ? (
+        <div className="metric">
+          <span className="metric-label">Live win rate</span>
+          <span className="metric-value" style={{ fontSize: 22 }}>
+            {live.overall.win_rate_pct != null ? `${live.overall.win_rate_pct}%` : '—'}
+          </span>
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+            {live.trade_count} closed trades ·{' '}
+            <span style={{ color: live.overall.total_pnl_abs >= 0 ? 'var(--accent)' : 'var(--danger)' }}>
+              {live.overall.total_pnl_abs >= 0 ? '+' : ''}${live.overall.total_pnl_abs}
+            </span>
           </span>
         </div>
-      ))}
+      ) : (
+        <div className="empty-state" style={{ padding: 0 }}>No closed trades yet</div>
+      )}
+
+      {data?.results && (
+        <>
+          <div style={{ height: 50 }}>
+            <EquityCurveChart
+              height={50}
+              series={data.results.map((r, i) => ({
+                name: r.symbol,
+                color: CURVE_COLORS[i % CURVE_COLORS.length],
+                points: r.equity_curve || [],
+              }))}
+            />
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Strategy backtest (simulated)</div>
+        </>
+      )}
     </div>
   );
 }
