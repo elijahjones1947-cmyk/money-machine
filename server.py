@@ -11,6 +11,7 @@ from brokers.alpaca_broker import AlpacaBroker
 from brokers.oanda_broker import OandaBroker
 from risk.risk_manager import RiskManager
 from hermes import hermes_bp, init_hermes
+from backtest.metrics import compute_metrics
 import json
 import os
 
@@ -613,20 +614,79 @@ def _process_trade_signal(action, symbol, is_manual):
 
 
 
+def _compute_live_performance():
+    """Same win-rate/max-drawdown/Sharpe methodology the backtester uses
+    (backtest.metrics.compute_metrics), computed from real closed trades
+    instead of a simulation -- lets the Backtest page show 'here's what
+    the strategy predicted' next to 'here's what actually happened' in
+    directly comparable terms.
+
+    Scoped to whatever's in state.trade_log (persisted trades are capped
+    at the most recent 200 by load_persisted_state -- see server.py/db.py),
+    not the account's full history since inception. Labeled as such in
+    the response rather than implying a longer track record than we
+    actually have data for.
+    """
+    closed = [t for t in state.trade_log if t.get('pnl') is not None]
+    if not closed:
+        return {
+            'overall': {'trade_count': 0, 'win_rate_pct': None, 'max_drawdown_pct': None, 'sharpe_ratio': None, 'total_pnl_abs': 0.0, 'avg_pnl_pct': None},
+            'by_regime': {},
+            'trade_count': 0,
+            'window_note': 'No closed trades yet.',
+        }
+
+    tagged_trades = []
+    for t in closed:
+        pnl_abs = float(t['pnl'])
+        qty = float(t['qty'])
+        price = float(t['price'])
+        proceeds = qty * price
+        cost_basis = proceeds - pnl_abs  # exact, not approximated -- see _process_trade_signal's pnl = (exit - entry) * size
+        pnl_pct = (pnl_abs / cost_basis * 100) if cost_basis > 0 else 0.0
+        tagged_trades.append({
+            'pnl_abs': pnl_abs,
+            'pnl_pct': pnl_pct,
+            'regime': t.get('regime') or 'unknown',
+        })
+
+    # Back into an implied starting capital (equity right before the
+    # oldest trade in this window) rather than assuming a fixed nominal
+    # value -- max drawdown % is meaningless without a real baseline.
+    total_realized = sum(t['pnl_abs'] for t in tagged_trades)
+    try:
+        current_equity = get_combined_equity()
+        initial_capital = current_equity - total_realized
+    except BrokerConnectionError:
+        initial_capital = state.equity_history['values'][0] if state.equity_history['values'] else 10000.0
+
+    metrics = compute_metrics(tagged_trades, initial_capital=initial_capital)
+    metrics['trade_count'] = len(tagged_trades)
+    metrics['initial_capital'] = round(initial_capital, 2)
+    metrics['window_note'] = 'Based on the last {} closed trades kept in the trade log.'.format(len(tagged_trades))
+    return metrics
+
+
 @app.route('/api/backtest')
 def api_backtest():
     if not session.get('auth'):
         return jsonify({'error': 'unauthorized'}), 401
 
+    try:
+        live_performance = _compute_live_performance()
+    except Exception as e:
+        logging.warning('Could not compute live performance: {}'.format(e))
+        live_performance = None
+
     results_path = os.path.join(os.path.dirname(__file__), 'backtest_results.json')
     if not os.path.exists(results_path):
-        return jsonify({'results': None, 'generated_at': None})
+        return jsonify({'results': None, 'generated_at': None, 'live_performance': live_performance})
 
     with open(results_path) as f:
         results = json.load(f)
 
     generated_at = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(results_path)))
-    return jsonify({'results': results, 'generated_at': generated_at})
+    return jsonify({'results': results, 'generated_at': generated_at, 'live_performance': live_performance})
 
 
 @app.route('/ui/layout', methods=['GET', 'POST'])
