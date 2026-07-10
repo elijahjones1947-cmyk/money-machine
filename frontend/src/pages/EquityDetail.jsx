@@ -1,5 +1,10 @@
+import { useMemo } from 'react';
 import { useDashboard } from '../hooks/useDashboard.js';
 import { EquityCurveChart } from '../components/EquityCurveChart.jsx';
+import { dailyPnlByAssetClass } from '../utils/equityByClass.js';
+
+const ASSET_CLASS_COLORS = { stock: '#7ab8ff', forex: '#39ff8f', crypto: '#ffce54' };
+const ASSET_CLASS_LABELS = { stock: 'Stock', forex: 'Forex', crypto: 'Crypto' };
 
 export function EquityDetail() {
   const { data, loading } = useDashboard();
@@ -14,6 +19,13 @@ export function EquityDetail() {
 
   const allTimeLow = values.length ? Math.min(...values) : null;
   const allTimeHigh = values.length ? Math.max(...values) : null;
+
+  const trades = data?.trades ?? [];
+  const positions = data?.positions ?? [];
+  const byClass = useMemo(() => dailyPnlByAssetClass(trades, positions), [trades, positions]);
+  const byClassSeries = Object.entries(byClass)
+    .filter(([, pts]) => pts.some((p) => p.equity !== 0))
+    .map(([ac, pts]) => ({ name: ASSET_CLASS_LABELS[ac], color: ASSET_CLASS_COLORS[ac], points: pts }));
 
   return (
     <div>
@@ -66,6 +78,29 @@ export function EquityDetail() {
             ) : (
               <div className="empty-state">Not enough equity history yet — this fills in as the bot runs.</div>
             )}
+          </div>
+
+          <div className="section">
+            <div className="section-title">Daily P&amp;L by asset class</div>
+            <div className="card">
+              <div className="page-subtitle" style={{ marginBottom: 12 }}>
+                Cumulative realized P&amp;L per day, plus today's open unrealized P&amp;L folded into the latest
+                point. Not a separate account balance — stock and crypto share one Alpaca account, so this tracks
+                each asset class's contribution to overall equity rather than an independent balance.
+              </div>
+              {byClassSeries.length > 0 ? (
+                <>
+                  <EquityCurveChart height={220} series={byClassSeries} showLabels />
+                  <div className="chart-legend">
+                    {byClassSeries.map((s) => (
+                      <span key={s.name}><span className="legend-dot" style={{ background: s.color }} />{s.name}</span>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <div className="empty-state">No closed trades yet to break out by asset class.</div>
+              )}
+            </div>
           </div>
         </>
       )}
