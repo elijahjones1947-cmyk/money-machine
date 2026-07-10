@@ -433,8 +433,10 @@ def _process_trade_signal(action, symbol, is_manual):
     broker = BROKERS[asset_class]
 
     if not state.bot_enabled and not is_manual:
+        logging.warning('Rejected {} {} {}: bot paused'.format(action, asset_class, symbol))
         return jsonify({'error': 'bot paused'}), 400
     if state.trades_today[asset_class] >= state.max_trades_per_day[asset_class] and not is_manual:
+        logging.warning('Rejected {} {} {}: max trades/day reached ({})'.format(action, asset_class, symbol, state.max_trades_per_day[asset_class]))
         return jsonify({'error': 'max {} trades reached for today'.format(asset_class)}), 400
 
     signal_key = '{0}_{1}'.format(symbol, action)
@@ -453,6 +455,7 @@ def _process_trade_signal(action, symbol, is_manual):
         if asset_class == 'stock':
             size = int(risk_amount / price)
             if size < 1:
+                logging.warning('Rejected {} stock {}: position too small (risk_amount={:.2f}, price={:.2f})'.format(action, symbol, risk_amount, price))
                 return jsonify({'error': 'position too small'}), 400
         elif asset_class == 'crypto':
             # Crypto supports fractional quantities (Alpaca allows down to
@@ -462,6 +465,7 @@ def _process_trade_signal(action, symbol, is_manual):
             # to get rejected right at the boundary.
             size = math.floor((risk_amount / price) * 1_000_000) / 1_000_000
             if size <= 0:
+                logging.warning('Rejected {} crypto {}: position too small (risk_amount={:.2f}, price={:.2f})'.format(action, symbol, risk_amount, price))
                 return jsonify({'error': 'position too small'}), 400
         else:
             # Forex units = risk_amount / price (same principle as stock
@@ -476,10 +480,12 @@ def _process_trade_signal(action, symbol, is_manual):
             # revisit before sizing real forex positions for live trading.
             size = math.floor(risk_amount / price)
             if size < 1:
+                logging.warning('Rejected {} forex {}: position too small (risk_amount={:.2f}, price={:.2f})'.format(action, symbol, risk_amount, price))
                 return jsonify({'error': 'position too small'}), 400
 
         approved, reason = risk_manager.check_trade(broker, symbol, action, size, asset_class, price=price)
         if not approved:
+            logging.warning('Rejected {} {} {}: {}'.format(action, asset_class, symbol, reason))
             return jsonify({'error': reason}), 400
 
         pnl = None
@@ -538,13 +544,16 @@ def _process_trade_signal(action, symbol, is_manual):
         return jsonify({'status': 'order placed', 'qty': size, 'symbol': symbol, 'asset_class': asset_class})
 
     except InsufficientFundsError as e:
+        logging.warning('Rejected {} {} {}: {}'.format(action, asset_class, symbol, e))
         return jsonify({'error': str(e)}), 400
     except MarketClosedError as e:
+        logging.warning('Rejected {} {} {}: {}'.format(action, asset_class, symbol, e))
         return jsonify({'error': str(e)}), 400
     except InvalidSymbolError as e:
+        logging.warning('Rejected {} {} {}: {}'.format(action, asset_class, symbol, e))
         return jsonify({'error': str(e)}), 400
     except BrokerConnectionError as e:
-        logging.error('Broker error: {}'.format(e))
+        logging.error('Broker error on {} {} {}: {}'.format(action, asset_class, symbol, e))
         return jsonify({'error': str(e)}), 502
 
 
