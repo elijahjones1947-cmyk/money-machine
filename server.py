@@ -405,16 +405,30 @@ def webhook():
     """External-facing route for TradingView alerts — requires the shared
     WEBHOOK_SECRET, never exposed to the browser."""
     data = request.json
+
+    # Log every inbound webhook call regardless of outcome (secret
+    # redacted) -- this is the only way to see what TradingView actually
+    # sent when a failure never makes it into _process_trade_signal's
+    # own rejection logging below (e.g. malformed JSON, missing fields).
+    safe_data = dict(data) if data else data
+    if safe_data and 'secret' in safe_data:
+        safe_data['secret'] = 'REDACTED'
+    logging.info('Webhook received: {}'.format(safe_data))
+
     if not data:
+        logging.warning('Rejected webhook call: no JSON body')
         return jsonify({'error': 'no data'}), 415
     if data.get('secret') != WEBHOOK_SECRET:
+        logging.warning('Rejected webhook call: bad secret')
         return jsonify({'error': 'unauthorized'}), 401
 
     action = data.get('action')
     symbol = data.get('symbol')
     if not action or not symbol:
+        logging.warning('Rejected webhook call: missing fields (action={!r}, symbol={!r})'.format(action, symbol))
         return jsonify({'error': 'missing fields'}), 400
     if symbol in ('{{TICKER}}', '{{ticker}}'):
+        logging.warning('Rejected webhook call: unsubstituted symbol placeholder')
         return jsonify({'error': 'invalid symbol'}), 400
 
     return _process_trade_signal(action, symbol, data.get('manual', False))
