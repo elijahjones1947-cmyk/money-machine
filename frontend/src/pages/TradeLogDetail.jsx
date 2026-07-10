@@ -94,11 +94,11 @@ export function TradeLogDetail() {
                 <div className="table-scroll">
                   <table className="data-table">
                     <thead>
-                      <tr><th>Time</th><th>Action</th><th>Symbol</th><th>Asset class</th><th>Qty</th><th>Price</th><th>P&amp;L</th><th>Regime</th></tr>
+                      <tr><th>Time</th><th>Action</th><th>Symbol</th><th>Asset class</th><th>Qty</th><th>Price</th><th>P&amp;L</th><th>Regime</th><th>Source</th></tr>
                     </thead>
                     <tbody>
                       {reversedTrades.map((t, i) => (
-                        <tr key={i}>
+                        <tr key={i} style={t.source === 'safety_stop_loss' ? { background: 'var(--danger-dim)' } : undefined}>
                           <td>{new Date(t.time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
                           <td><span className={`action-badge ${t.action === 'sell' ? 'sell' : 'buy'}`}>{t.action}</span></td>
                           <td>{t.symbol}</td>
@@ -109,6 +109,15 @@ export function TradeLogDetail() {
                             {t.pnl == null ? '—' : `${t.pnl >= 0 ? '+' : ''}${t.pnl}`}
                           </td>
                           <td><span className="regime-badge">{t.regime || 'unknown'}</span></td>
+                          <td>
+                            {t.source === 'safety_stop_loss' ? (
+                              <span className="action-badge sell" title="Force-closed by the independent safety-net monitor, not a normal strategy exit">Safety net</span>
+                            ) : t.source === 'manual' ? (
+                              <span className="regime-badge">Manual</span>
+                            ) : (
+                              <span className="regime-badge">Strategy</span>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>

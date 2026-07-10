@@ -62,17 +62,28 @@ BROKER_CONFIG = {
 # volatility of stocks/forex, so reusing their thresholds would be
 # too loose. No max_leverage key for crypto: Alpaca crypto is spot-only
 # (non-marginable), so leverage isn't a relevant risk lever here.
+# safety_stop_loss_pct: an INDEPENDENT backstop, not the strategy's own
+# intended exit -- see run_position_safety_checks() in server.py. This
+# is deliberately looser than the Pine Script strategy's own stop
+# (backtest/strategy.py's default stop_loss_pct is 0.35%) so it doesn't
+# fight normal strategy-driven exits; it only fires if a position's
+# unrealized loss blows through this threshold, which should only
+# happen if something's actually wrong (a missed/failed webhook exit,
+# TradingView down, etc.) rather than in the ordinary course of the
+# strategy working as intended. Wider for crypto than stock/forex since
+# normal crypto volatility is bigger -- a tight threshold there would
+# force-close positions on routine noise, not just real problems.
 RISK_CONFIG = {
     "paper": {
-        "stock": {"max_position_size_pct": 0.10, "max_daily_loss_pct": 0.05, "max_open_positions": 5},
-        "forex": {"max_position_size_pct": 0.05, "max_daily_loss_pct": 0.03, "max_open_positions": 3, "max_leverage": 20},
-        "crypto": {"max_position_size_pct": 0.03, "max_daily_loss_pct": 0.02, "max_open_positions": 3},
+        "stock": {"max_position_size_pct": 0.10, "max_daily_loss_pct": 0.05, "max_open_positions": 5, "safety_stop_loss_pct": 0.02},
+        "forex": {"max_position_size_pct": 0.05, "max_daily_loss_pct": 0.03, "max_open_positions": 3, "max_leverage": 20, "safety_stop_loss_pct": 0.015},
+        "crypto": {"max_position_size_pct": 0.03, "max_daily_loss_pct": 0.02, "max_open_positions": 3, "safety_stop_loss_pct": 0.05},
         "account_wide": {"max_daily_loss_pct": 0.08},
     },
     "live": {
-        "stock": {"max_position_size_pct": 0.05, "max_daily_loss_pct": 0.03, "max_open_positions": 5},
-        "forex": {"max_position_size_pct": 0.02, "max_daily_loss_pct": 0.01, "max_open_positions": 3, "max_leverage": 10},
-        "crypto": {"max_position_size_pct": 0.015, "max_daily_loss_pct": 0.01, "max_open_positions": 3},
+        "stock": {"max_position_size_pct": 0.05, "max_daily_loss_pct": 0.03, "max_open_positions": 5, "safety_stop_loss_pct": 0.02},
+        "forex": {"max_position_size_pct": 0.02, "max_daily_loss_pct": 0.01, "max_open_positions": 3, "max_leverage": 10, "safety_stop_loss_pct": 0.015},
+        "crypto": {"max_position_size_pct": 0.015, "max_daily_loss_pct": 0.01, "max_open_positions": 3, "safety_stop_loss_pct": 0.05},
         "account_wide": {"max_daily_loss_pct": 0.05},
     },
 }

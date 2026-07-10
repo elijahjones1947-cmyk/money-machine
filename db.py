@@ -83,6 +83,9 @@ def init_schema():
                 ALTER TABLE trades ADD COLUMN IF NOT EXISTS regime TEXT;
             """)
             cur.execute("""
+                ALTER TABLE trades ADD COLUMN IF NOT EXISTS source TEXT;
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS equity_history (
                     id SERIAL PRIMARY KEY,
                     recorded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -116,16 +119,16 @@ def init_schema():
 
 # --- Trades -----------------------------------------------------------
 
-def save_trade(action, symbol, asset_class, qty, price, pnl=None, regime=None):
+def save_trade(action, symbol, asset_class, qty, price, pnl=None, regime=None, source=None):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO trades (action, symbol, asset_class, qty, price, pnl, regime)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO trades (action, symbol, asset_class, qty, price, pnl, regime, source)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, executed_at;
                 """,
-                (action, symbol, asset_class, qty, price, pnl, regime),
+                (action, symbol, asset_class, qty, price, pnl, regime, source),
             )
             return cur.fetchone()
 
@@ -135,7 +138,7 @@ def get_recent_trades(limit=200):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT executed_at, action, symbol, asset_class, qty, price, pnl, regime
+                SELECT executed_at, action, symbol, asset_class, qty, price, pnl, regime, source
                 FROM trades
                 ORDER BY executed_at DESC
                 LIMIT %s;

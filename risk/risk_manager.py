@@ -30,7 +30,7 @@ class RiskManager:
         """Call once per day (e.g. on first trade or a daily reset job)."""
         self.starting_equity_today = total_equity
 
-    def check_trade(self, broker, symbol, side, size, asset_class, price=None):
+    def check_trade(self, broker, symbol, side, size, asset_class, price=None, reduces_position=False):
         """Returns (approved: bool, reason: str).
 
         `price` should be the SAME price snapshot the caller used to size
@@ -39,7 +39,25 @@ class RiskManager:
         where a correctly-sized trade gets rejected because the price
         ticked between sizing and validation. Always pass price when you
         have it.
+
+        `reduces_position` should be True when this trade strictly
+        reduces or closes existing exposure (a sell sized to <= what's
+        currently held long, or a buy sized to <= what's currently held
+        short) rather than opening or adding to a position. Every check
+        in here exists to prevent taking on MORE risk -- none of them
+        should ever block a trade that's making risk smaller, and
+        letting them do so is actively dangerous: it's exactly the
+        scenario where a halt (hit right after a big loss) would trap
+        you in a losing position you're trying to exit. Bypassing ALL
+        checks (including the account-wide and per-asset-class halts)
+        for a genuinely risk-reducing trade is intentional, not an
+        oversight -- see the position safety-net monitor in server.py,
+        which depends on this to be able to force-close a position even
+        when trading is halted.
         """
+        if reduces_position:
+            return True, "OK (reduces/closes existing position -- risk checks don't apply)"
+
         if self.account_halted:
             return False, "ACCOUNT-WIDE halt active - all trading stopped"
 
@@ -56,28 +74,17 @@ class RiskManager:
 
         # position size cap — use the caller's price snapshot if given,
         # so sizing and validation agree even on fast-moving assets.
-        # Skipped for sells: this cap exists to stop OPENING an
-        # oversized position, not to block CLOSING one you already
-        # hold. A sell sized to your actual held quantity (see
-        # server.py's _get_held_qty) can legitimately be worth more
-        # than max_position_size_pct if equity has since dropped or the
-        # position was opened before risk settings changed -- refusing
-        # to let you close it in that case is backwards from a risk
-        # management standpoint.
         if price is None:
             price = broker.get_price(symbol)
         position_value = float(size) * price
         max_allowed = account["equity"] * rules["max_position_size_pct"]
-        if side != "sell" and position_value > max_allowed:
+        if position_value > max_allowed:
             return False, "Position too big: ${:.2f} > max ${:.2f}".format(position_value, max_allowed)
 
-        # max open positions — same reasoning: closing a position never
-        # increases your open-position count, so a sell shouldn't be
-        # blocked by a cap meant to stop opening MORE positions.
-        if side != "sell":
-            current_positions = broker.get_positions()
-            if len(current_positions) >= rules["max_open_positions"]:
-                return False, "Max open positions reached for {}".format(asset_class)
+        # max open positions
+        current_positions = broker.get_positions()
+        if len(current_positions) >= rules["max_open_positions"]:
+            return False, "Max open positions reached for {}".format(asset_class)
 
         # leverage check (mainly relevant for forex; crypto/stock configs
         # simply omit max_leverage, so this is skipped for them)
