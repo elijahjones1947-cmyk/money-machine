@@ -95,6 +95,7 @@ def load_persisted_state():
                 "price": str(t["price"]),
                 "pnl": float(t["pnl"]) if t["pnl"] is not None else None,
                 "regime": t.get("regime"),
+                "source": t.get("source"),  # None for trades logged before this column existed -- treated as 'webhook' in the UI
             }
             for t in reversed(recent_trades)  # DB gives newest-first, state.py expects oldest-first
         ]
@@ -140,6 +141,58 @@ def run_regime_checks():
                 logging.warning("Regime check failed for {}: {}".format(symbol, e))
 
 
+def run_position_safety_checks():
+    """Independent backstop against a stuck losing position: if any
+    open position's unrealized loss breaches its asset class's
+    safety_stop_loss_pct (config.py), force-close it via the SAME
+    order-placement/logging/persistence path a normal trade uses
+    (_process_trade_signal with force_close_qty set), regardless of
+    whether TradingView ever sends a matching exit webhook.
+
+    This is deliberately NOT the strategy's own stop-loss -- it's a
+    last-resort safety net for when something's actually gone wrong
+    (a missed/failed exit alert, TradingView down, a webhook silently
+    rejected, etc.), not a substitute for the strategy's own exit
+    logic. See config.py's safety_stop_loss_pct docstring for why the
+    threshold is looser than the strategy's own intended stop.
+
+    Runs independently of trading itself, same as run_regime_checks --
+    a failure checking one position should never prevent checking (or
+    force-closing) the others.
+    """
+    risk_config = config.get_risk_config()
+    for p in get_all_positions():
+        rules = risk_config.get(p["asset_class"], {})
+        threshold_pct = rules.get("safety_stop_loss_pct")
+        if not threshold_pct:
+            continue
+
+        cost_basis = p["qty"] * p["avg_entry"]
+        if cost_basis <= 0 or p["unrealized_pl"] >= 0:
+            continue
+
+        loss_pct = abs(p["unrealized_pl"]) / cost_basis
+        if loss_pct < threshold_pct:
+            continue
+
+        close_action = "sell" if p["direction"] == "long" else "buy"
+        logging.error(
+            "SAFETY NET: {} {} unrealized loss {:.2f}% >= {:.2f}% threshold -- force-closing ({} {})".format(
+                p["asset_class"], p["symbol"], loss_pct * 100, threshold_pct * 100, close_action, p["qty"],
+            )
+        )
+        try:
+            with app.app_context():
+                result = _process_trade_signal(
+                    close_action, p["symbol"], is_manual=False,
+                    source="safety_stop_loss", force_close_qty=p["qty"],
+                )
+            if isinstance(result, tuple) and result[1] != 200:
+                logging.error("Safety-net force-close for {} did not succeed (status {})".format(p["symbol"], result[1]))
+        except Exception as e:
+            logging.error("Safety-net force-close FAILED for {}: {}".format(p["symbol"], e))
+
+
 scheduler = BackgroundScheduler(daemon=True)
 # next_run_time defaults to "now" for an interval trigger when omitted,
 # so this fires an immediate first check on boot, then every 15 minutes
@@ -150,6 +203,13 @@ scheduler = BackgroundScheduler(daemon=True)
 # tagging) fell back to "unknown" forever. That's the actual root
 # cause of regime always showing unknown, not a classification bug.
 scheduler.add_job(run_regime_checks, "interval", minutes=15, next_run_time=datetime.datetime.now())
+# Checked far more often than regime (5 min vs 15) since this is the
+# thing standing between a losing position and an unbounded loss if
+# TradingView ever stops sending exit signals -- see the function's
+# docstring. Also fires immediately on boot for the same reason
+# next_run_time=None caused the regime bug above: never leave a safety
+# job in APScheduler's paused-by-default state.
+scheduler.add_job(run_position_safety_checks, "interval", minutes=5, next_run_time=datetime.datetime.now())
 scheduler.start()
 # --- end market regime classifier scheduler ------------------------------
 
@@ -177,6 +237,53 @@ def _get_held_qty(broker, symbol):
     except BrokerConnectionError as e:
         logging.warning("Could not check held position for {}: {}".format(symbol, e))
     return 0.0
+
+
+def get_all_positions():
+    """Open positions across both brokers with RAW numeric fields (not
+    display-formatted) -- shared by /api/dashboard (which formats them
+    for display) and run_position_safety_checks() (which needs to do
+    math on them). Each dict's 'qty' is always a positive magnitude;
+    direction ('long'/'short') is reported separately in 'direction'
+    rather than as a sign on qty, so callers never have to remember
+    which convention applies to which broker. Stock/crypto (Alpaca)
+    are always 'long' here since this bot never shorts them; forex
+    (OANDA) can be either.
+    """
+    positions = []
+    try:
+        for p in alpaca_broker.get_positions():
+            ac = asset_class_for_symbol(p.symbol)
+            qty = float(p.qty)
+            positions.append({
+                'symbol': p.symbol, 'asset_class': ac, 'direction': 'long',
+                'qty': qty, 'avg_entry': float(p.avg_entry_price),
+                'current_price': float(p.current_price),
+                'unrealized_pl': float(p.unrealized_pl),
+            })
+    except BrokerConnectionError:
+        pass
+
+    try:
+        for p in oanda_broker.get_positions():
+            long_units = float(p.get('long', {}).get('units', 0))
+            short_units = float(p.get('short', {}).get('units', 0))
+            direction = 'long' if long_units != 0 else 'short' if short_units != 0 else None
+            if direction is None:
+                continue
+            qty = long_units if direction == 'long' else abs(short_units)
+            avg_price = p.get('long', {}).get('averagePrice') if direction == 'long' else p.get('short', {}).get('averagePrice')
+            unrealized = float(p.get('long', {}).get('unrealizedPL', 0)) + float(p.get('short', {}).get('unrealizedPL', 0))
+            positions.append({
+                'symbol': p['instrument'], 'asset_class': 'forex', 'direction': direction,
+                'qty': qty, 'avg_entry': float(avg_price or 0),
+                'current_price': None,
+                'unrealized_pl': unrealized,
+            })
+    except BrokerConnectionError:
+        pass
+
+    return positions
 
 
 def get_combined_equity():
@@ -269,38 +376,17 @@ def api_dashboard():
         except Exception as e:
             logging.warning('Could not persist equity point to DB: {}'.format(e))
 
+    raw_positions = get_all_positions()
     positions = []
-    try:
-        for p in alpaca_broker.get_positions():
-            # alpaca_broker.get_positions() returns BOTH stocks and crypto
-            # (same account) — split them back out by symbol format so the
-            # dashboard tags each correctly instead of lumping crypto in as 'stock'.
-            ac = asset_class_for_symbol(p.symbol)
-            price_fmt = '{:.4f}' if ac == 'crypto' else '{:.2f}'
-            positions.append({
-                'symbol': p.symbol, 'qty': p.qty, 'asset_class': ac,
-                'avg_entry': price_fmt.format(float(p.avg_entry_price)),
-                'current_price': price_fmt.format(float(p.current_price)),
-                'unrealized_pl': round(float(p.unrealized_pl), 2),
-            })
-    except BrokerConnectionError:
-        pass
-
-    try:
-        for p in oanda_broker.get_positions():
-            long_units = float(p.get('long', {}).get('units', 0))
-            short_units = float(p.get('short', {}).get('units', 0))
-            units = long_units if long_units != 0 else short_units
-            avg_price = p.get('long', {}).get('averagePrice') if long_units != 0 else p.get('short', {}).get('averagePrice')
-            unrealized = float(p.get('long', {}).get('unrealizedPL', 0)) + float(p.get('short', {}).get('unrealizedPL', 0))
-            positions.append({
-                'symbol': p['instrument'], 'qty': units, 'asset_class': 'forex',
-                'avg_entry': '{:.5f}'.format(float(avg_price or 0)),
-                'current_price': '—',
-                'unrealized_pl': round(unrealized, 2),
-            })
-    except BrokerConnectionError:
-        pass
+    for p in raw_positions:
+        price_fmt = '{:.5f}' if p['asset_class'] == 'forex' else '{:.4f}' if p['asset_class'] == 'crypto' else '{:.2f}'
+        signed_qty = p['qty'] if p['direction'] == 'long' else -p['qty']
+        positions.append({
+            'symbol': p['symbol'], 'qty': signed_qty, 'asset_class': p['asset_class'],
+            'avg_entry': price_fmt.format(p['avg_entry']),
+            'current_price': price_fmt.format(p['current_price']) if p['current_price'] is not None else '—',
+            'unrealized_pl': round(p['unrealized_pl'], 2),
+        })
 
     completed = [t for t in state.trade_log if t.get('pnl') is not None]
     wins = [t for t in completed if t['pnl'] > 0]
@@ -458,29 +544,42 @@ def api_manual_trade():
     symbol = data.get('symbol')
     if not action or not symbol:
         return jsonify({'error': 'missing fields'}), 400
-    return _process_trade_signal(action, symbol, is_manual=True)
+    return _process_trade_signal(action, symbol, is_manual=True, source='manual')
 
 
-def _process_trade_signal(action, symbol, is_manual):
-    """Shared by both /webhook (TradingView, secret-gated) and
-    /api/manual_trade (dashboard buttons, session-gated) — sizes, risk
-    checks, executes, and logs a trade signal identically regardless of
-    where it came from."""
+def _process_trade_signal(action, symbol, is_manual, source='webhook', force_close_qty=None):
+    """Shared by /webhook (TradingView, secret-gated), /api/manual_trade
+    (dashboard buttons, session-gated), AND run_position_safety_checks()
+    (the automatic stop-loss monitor) — sizes, risk checks, executes,
+    and logs a trade signal identically regardless of where it came
+    from.
+
+    `source` is persisted on the trade for the UI to show ('webhook',
+    'manual', or 'safety_stop_loss') -- distinguishing a normal strategy
+    exit from an emergency one matters, don't let it get lost.
+
+    `force_close_qty`, when set, means "close exactly this much, right
+    now" (used by the safety-net monitor): skips bot_enabled/max-trades/
+    dedup entirely (an emergency exit must never be blocked by them)
+    and skips the normal per-asset-class sizing math in favor of using
+    the exact currently-held quantity.
+    """
     check_daily_rollover()
 
     asset_class = asset_class_for_symbol(symbol)
     broker = BROKERS[asset_class]
+    is_forced_close = force_close_qty is not None
 
-    if not state.bot_enabled and not is_manual:
+    if not state.bot_enabled and not is_manual and not is_forced_close:
         logging.warning('Rejected {} {} {}: bot paused'.format(action, asset_class, symbol))
         return jsonify({'error': 'bot paused'}), 400
-    if state.trades_today[asset_class] >= state.max_trades_per_day[asset_class] and not is_manual:
+    if state.trades_today[asset_class] >= state.max_trades_per_day[asset_class] and not is_manual and not is_forced_close:
         logging.warning('Rejected {} {} {}: max trades/day reached ({})'.format(action, asset_class, symbol, state.max_trades_per_day[asset_class]))
         return jsonify({'error': 'max {} trades reached for today'.format(asset_class)}), 400
 
     signal_key = '{0}_{1}'.format(symbol, action)
     now = time.time()
-    if not is_manual:
+    if not is_manual and not is_forced_close:
         if signal_key in state.last_signal_time:
             if now - state.last_signal_time[signal_key] < 60:
                 return jsonify({'status': 'duplicate ignored'}), 200
@@ -490,8 +589,12 @@ def _process_trade_signal(action, symbol, is_manual):
         account = broker.get_account_info()
         price = broker.get_price(symbol)
         risk_amount = account['equity'] * (state.risk_percent[asset_class] / 100.0)
+        reduces_position = False
 
-        if action == 'sell' and asset_class in ('stock', 'crypto'):
+        if is_forced_close:
+            size = force_close_qty
+            reduces_position = True
+        elif action == 'sell' and asset_class in ('stock', 'crypto'):
             # Alpaca is spot-only for crypto (no shorting), and we don't
             # want naked shorts on stock either -- a sell should close
             # whatever the bot's REAL account actually holds, not
@@ -508,6 +611,7 @@ def _process_trade_signal(action, symbol, is_manual):
                 logging.warning('Rejected sell {} {}: bot holds no position to sell'.format(asset_class, symbol))
                 return jsonify({'error': 'no position to sell for {} (bot holds none)'.format(symbol)}), 400
             size = held_qty
+            reduces_position = True
         elif asset_class == 'stock':
             size = int(risk_amount / price)
             if size < 1:
@@ -539,23 +643,36 @@ def _process_trade_signal(action, symbol, is_manual):
                 logging.warning('Rejected {} forex {}: position too small (risk_amount={:.2f}, price={:.2f})'.format(action, symbol, risk_amount, price))
                 return jsonify({'error': 'position too small'}), 400
 
-        approved, reason = risk_manager.check_trade(broker, symbol, action, size, asset_class, price=price)
+        approved, reason = risk_manager.check_trade(
+            broker, symbol, action, size, asset_class, price=price, reduces_position=reduces_position,
+        )
         if not approved:
             logging.warning('Rejected {} {} {}: {}'.format(action, asset_class, symbol, reason))
             return jsonify({'error': reason}), 400
 
+        # pnl is only computable when this trade is CLOSING something:
+        # a 'sell' closing a long looks up the last 'buy' as its entry
+        # (long pnl = exit - entry); a 'buy' closing a short (forex only,
+        # since stock/crypto never short here -- see get_all_positions'
+        # direction field) looks up the last 'sell' as its entry instead
+        # (short pnl = entry - exit, since profit comes from price
+        # falling). An opening trade (not reduces_position) has no entry
+        # reference yet, so pnl stays None until it's eventually closed.
         pnl = None
-        if action == 'sell':
-            last_buy = next(
+        if reduces_position:
+            entry_action = 'buy' if action == 'sell' else 'sell'
+            entry_trade = next(
                 (t for t in reversed(state.trade_log)
-                 if t['action'] == 'buy' and t['symbol'] == symbol and t['asset_class'] == asset_class),
+                 if t['action'] == entry_action and t['symbol'] == symbol and t['asset_class'] == asset_class),
                 None
             )
-            if last_buy:
-                pnl = round((price - float(last_buy['price'])) * size, 2)
+            if entry_trade:
+                entry_price = float(entry_trade['price'])
+                pnl = round((price - entry_price) * size, 2) if action == 'sell' else round((entry_price - price) * size, 2)
 
         broker.place_order(symbol, action, size)
-        logging.info('{} {} {} of {} ({})'.format(action.upper(), size, asset_class, symbol, config.TRADING_MODE))
+        log_prefix = 'SAFETY-NET FORCED CLOSE: ' if is_forced_close else ''
+        logging.info('{}{} {} {} of {} ({})'.format(log_prefix, action.upper(), size, asset_class, symbol, config.TRADING_MODE))
 
         # Attach whatever regime tag we most recently computed for this
         # symbol (from the scheduled classifier) — a DB miss just means
@@ -583,9 +700,10 @@ def _process_trade_signal(action, symbol, is_manual):
             'price': price_str,
             'pnl': pnl,
             'regime': trade_regime,
+            'source': source,
         })
         try:
-            db.save_trade(action, symbol, asset_class, size, price, pnl, regime=trade_regime)
+            db.save_trade(action, symbol, asset_class, size, price, pnl, regime=trade_regime, source=source)
         except Exception as e:
             # Trade already executed on the broker — a DB hiccup here should
             # never look like the trade itself failed. Log and move on.
