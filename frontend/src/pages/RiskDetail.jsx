@@ -6,13 +6,18 @@ export function RiskDetail() {
 
   return (
     <div>
-      <h2>Risk state</h2>
+      <div className="page-header">
+        <div>
+          <h1>Risk state</h1>
+          <div className="page-subtitle">Live halt status per asset class and account-wide.</div>
+        </div>
+      </div>
       {loading || !risk ? (
         <div className="empty-state">Loading…</div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 480 }}>
+        <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 480 }}>
           <div className="pill" style={{ width: 'fit-content' }}>
-            <span className={`pill-dot ${risk.account_halted ? '' : 'off'}`} style={{ background: risk.account_halted ? 'var(--danger)' : 'var(--accent)' }} />
+            <span className="pill-dot" style={{ background: risk.account_halted ? 'var(--danger)' : 'var(--accent)' }} />
             Account-wide: {risk.account_halted ? 'HALTED' : 'normal'}
           </div>
           {['stock', 'forex', 'crypto'].map((ac) => (
@@ -23,6 +28,19 @@ export function RiskDetail() {
               </span>
             </div>
           ))}
+          {risk.daily_pnl && (
+            <div style={{ marginTop: 4 }}>
+              <div className="section-title" style={{ marginBottom: 8 }}>Today's P&amp;L by asset class</div>
+              {['stock', 'forex', 'crypto'].map((ac) => (
+                <div key={ac} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                  <span style={{ textTransform: 'capitalize', color: 'var(--text-secondary)' }}>{ac}</span>
+                  <span style={{ color: risk.daily_pnl[ac] >= 0 ? 'var(--accent)' : 'var(--danger)', fontWeight: 600 }}>
+                    {risk.daily_pnl[ac] >= 0 ? '+' : ''}${risk.daily_pnl[ac]}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

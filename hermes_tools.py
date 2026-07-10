@@ -266,6 +266,84 @@ def get_upcoming_earnings(ctx, **_):
     }
 
 
+def get_daily_summary(ctx, **_):
+    """Health-check + gains/losses narrative data, in one call: is the
+    bot enabled, is anything halted, and what actually happened today
+    (trade count, win/loss split, net P&L, broken out by symbol) plus
+    yesterday's for comparison. Returns structured numbers -- Hermes
+    narrates them, it doesn't compute them, so the math can't drift
+    from what the dashboard shows.
+
+    "Today"/"yesterday" are calendar days in server local time, based
+    on each trade's full timestamp (state.trade_log's `time` field --
+    see server.py's load_persisted_state/  _process_trade_signal for
+    where that's populated as a full ISO datetime, not just a
+    time-of-day, specifically so this kind of day-grouping works)."""
+    import datetime as _dt
+
+    now = _dt.datetime.now()
+    today_key = now.date().isoformat()
+    yesterday_key = (now.date() - _dt.timedelta(days=1)).isoformat()
+
+    def day_key(trade):
+        try:
+            return _dt.datetime.fromisoformat(trade["time"]).date().isoformat()
+        except (ValueError, TypeError, KeyError):
+            return None
+
+    def summarize_day(key):
+        day_trades = [t for t in state.trade_log if day_key(t) == key]
+        closed = [t for t in day_trades if t.get("pnl") is not None]
+        wins = [t for t in closed if t["pnl"] > 0]
+        losses = [t for t in closed if t["pnl"] < 0]
+        by_symbol = {}
+        for t in closed:
+            by_symbol.setdefault(t["symbol"], 0.0)
+            by_symbol[t["symbol"]] += t["pnl"]
+        return {
+            "trade_count": len(day_trades),
+            "closed_trade_count": len(closed),
+            "wins": len(wins),
+            "losses": len(losses),
+            "net_pnl": round(sum(t["pnl"] for t in closed), 2) if closed else 0.0,
+            "pnl_by_symbol": {s: round(p, 2) for s, p in by_symbol.items()},
+        }
+
+    rm = ctx.risk_manager
+    health = {
+        "bot_enabled": state.bot_enabled,
+        "account_halted": rm.account_halted,
+        "halted_asset_classes": [ac for ac in rm.asset_classes if rm.trading_halted[ac]],
+        "trading_mode": config.TRADING_MODE,
+    }
+
+    try:
+        stock_acct = ctx.alpaca_broker.get_account_info()
+    except BrokerConnectionError as e:
+        stock_acct = {"error": str(e)}
+    try:
+        forex_acct = ctx.oanda_broker.get_account_info()
+    except BrokerConnectionError as e:
+        forex_acct = {"error": str(e)}
+
+    combined_equity = None
+    if "error" not in stock_acct and "error" not in forex_acct:
+        combined_equity = round(stock_acct["equity"] + forex_acct["equity"], 2)
+
+    equity_change_today = None
+    if combined_equity is not None and rm.starting_equity_today:
+        equity_change_today = round(combined_equity - rm.starting_equity_today, 2)
+
+    return {
+        "as_of": now.isoformat(),
+        "health": health,
+        "combined_equity": combined_equity,
+        "equity_change_today": equity_change_today,
+        "today": summarize_day(today_key),
+        "yesterday": summarize_day(yesterday_key),
+    }
+
+
 # --- Executor tools (STAGED, not run immediately — see hermes.py) --------
 
 def pause_trading(ctx, **_):
@@ -335,6 +413,7 @@ TOOL_FUNCTIONS = {
     "get_broad_market_context": get_broad_market_context,
     "get_backtest_results": get_backtest_results,
     "get_upcoming_earnings": get_upcoming_earnings,
+    "get_daily_summary": get_daily_summary,
     "pause_trading": pause_trading,
     "resume_trading": resume_trading,
     "adjust_risk_limit": adjust_risk_limit,
@@ -354,6 +433,7 @@ TOOL_SCHEMAS = [
     {"name": "get_broad_market_context", "description": "Get a snapshot of major index/sector ETFs (SPY, QQQ, DIA, and key sector ETFs) as a proxy for overall market conditions.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_backtest_results", "description": "Get metrics (win rate, max drawdown, Sharpe) from the most recent backtest run, overall and broken out by market regime. Pass symbol to filter to one instrument.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}}}},
     {"name": "get_upcoming_earnings", "description": "Get upcoming earnings dates for watched symbols. Currently returns nothing — no data source configured yet.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_daily_summary", "description": "Get a health check (bot enabled, halts, mode) plus today's and yesterday's trade counts, win/loss split, and net P&L by symbol. Use this to check the bot is functioning properly and to explain today's gains or losses with real numbers.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "pause_trading", "description": "EXECUTOR (requires user confirmation): pause the bot — blocks all new automated trades until resumed.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "resume_trading", "description": "EXECUTOR (requires user confirmation): resume the bot after a pause.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "adjust_risk_limit", "description": "EXECUTOR (requires user confirmation): change the position-sizing risk percent for an asset class. Rejected if it would exceed the risk manager's hard cap for that asset class.", "input_schema": {"type": "object", "properties": {"asset_class": {"type": "string", "enum": ["stock", "forex", "crypto"]}, "risk_percent": {"type": "number"}}, "required": ["asset_class", "risk_percent"]}},

@@ -6,6 +6,7 @@ import { TopBar } from './components/TopBar.jsx';
 import { Login } from './pages/Login.jsx';
 import { Dashboard } from './pages/Dashboard.jsx';
 import { PositionsDetail } from './pages/PositionsDetail.jsx';
+import { EquityDetail } from './pages/EquityDetail.jsx';
 import { RiskDetail } from './pages/RiskDetail.jsx';
 import { TradeLogDetail } from './pages/TradeLogDetail.jsx';
 import { RegimeDetail } from './pages/RegimeDetail.jsx';
@@ -24,6 +25,7 @@ function AppShell({ theme, onThemeChange }) {
         <Routes>
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/positions" element={<PositionsDetail />} />
+          <Route path="/equity" element={<EquityDetail />} />
           <Route path="/risk" element={<RiskDetail />} />
           <Route path="/trades" element={<TradeLogDetail />} />
           <Route path="/regime" element={<RegimeDetail />} />

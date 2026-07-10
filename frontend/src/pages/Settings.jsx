@@ -102,28 +102,41 @@ export function Settings() {
   if (loading || !data) return <div className="empty-state">Loading…</div>;
 
   return (
-    <div style={{ maxWidth: 560 }}>
-      <h2>Settings</h2>
-
-      <h3 style={{ marginTop: 24, marginBottom: 4 }}>Risk & sizing</h3>
-      <div style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 8 }}>
-        Risk % controls position sizing. If it's set above the risk manager's cap, every trade for that
-        asset class gets silently rejected — this is exactly what caused a 2-day forex outage previously.
+    <div style={{ maxWidth: 640 }}>
+      <div className="page-header">
+        <div>
+          <h1>Settings</h1>
+          <div className="page-subtitle">Risk sizing and watchlist, per asset class.</div>
+        </div>
       </div>
-      {ASSET_CLASSES.map((ac) => (
-        <RiskRow
-          key={ac}
-          assetClass={ac}
-          currentRiskPercent={data.risk_percent[ac]}
-          currentMaxTrades={data.max_trades_per_day[ac]}
-          capPct={data.risk_caps?.[ac] ? data.risk_caps[ac].max_position_size_pct * 100 : null}
-        />
-      ))}
 
-      <h3 style={{ marginTop: 32, marginBottom: 4 }}>Watchlist</h3>
-      {ASSET_CLASSES.map((ac) => (
-        <WatchlistRow key={ac} assetClass={ac} symbols={data.watched_symbols[ac] || []} onAdded={refetch} />
-      ))}
+      <div className="section">
+        <div className="section-title">Risk &amp; sizing</div>
+        <div className="card">
+          <div style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 8 }}>
+            Risk % controls position sizing. If it's set above the risk manager's cap, every trade for that
+            asset class gets silently rejected — this is exactly what caused a 2-day forex outage previously.
+          </div>
+          {ASSET_CLASSES.map((ac) => (
+            <RiskRow
+              key={ac}
+              assetClass={ac}
+              currentRiskPercent={data.risk_percent[ac]}
+              currentMaxTrades={data.max_trades_per_day[ac]}
+              capPct={data.risk_caps?.[ac] ? data.risk_caps[ac].max_position_size_pct * 100 : null}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="section">
+        <div className="section-title">Watchlist</div>
+        <div className="card">
+          {ASSET_CLASSES.map((ac) => (
+            <WatchlistRow key={ac} assetClass={ac} symbols={data.watched_symbols[ac] || []} onAdded={refetch} />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }

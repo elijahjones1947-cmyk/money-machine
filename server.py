@@ -86,7 +86,7 @@ def load_persisted_state():
         recent_trades = db.get_recent_trades(limit=200)
         state.trade_log = [
             {
-                "time": t["executed_at"].strftime("%H:%M:%S"),
+                "time": t["executed_at"].isoformat(),  # full datetime -- needed to group by day (calendar heatmap), not just time-of-day
                 "action": t["action"],
                 "symbol": t["symbol"],
                 "asset_class": t["asset_class"],
@@ -100,7 +100,7 @@ def load_persisted_state():
 
         eq_rows = db.get_equity_history(limit=100)
         state.equity_history = {
-            "times": [e["recorded_at"].strftime("%H:%M") for e in eq_rows],
+            "times": [e["recorded_at"].isoformat() for e in eq_rows],  # full datetime, not just time-of-day -- needed for a real multi-day equity curve
             "values": [float(e["equity"]) for e in eq_rows],
         }
 
@@ -248,7 +248,7 @@ def api_dashboard():
 
     combined_equity = stock_acct["equity"] + forex_acct["equity"]
 
-    now = time.strftime('%H:%M')
+    now = datetime.datetime.now().isoformat(timespec='minutes')
     if not state.equity_history['times'] or state.equity_history['times'][-1] != now:
         state.equity_history['times'].append(now)
         state.equity_history['values'].append(round(combined_equity, 2))
@@ -325,6 +325,8 @@ def api_dashboard():
             'forex_halted': risk_manager.trading_halted['forex'],
             'crypto_halted': risk_manager.trading_halted['crypto'],
             'account_halted': risk_manager.account_halted,
+            'starting_equity_today': round(risk_manager.starting_equity_today, 2) if risk_manager.starting_equity_today else None,
+            'daily_pnl': {ac: round(risk_manager.daily_pnl[ac], 2) for ac in risk_manager.asset_classes},
         },
         'positions': positions,
         'trades': state.trade_log,
@@ -564,7 +566,7 @@ def _process_trade_signal(action, symbol, is_manual):
             else '{:.2f}'.format(price)
         )
         state.trade_log.append({
-            'time': time.strftime('%H:%M:%S'),
+            'time': datetime.datetime.now().isoformat(),  # full datetime, not just time-of-day -- see load_persisted_state's matching format
             'action': action,
             'symbol': symbol,
             'asset_class': asset_class,

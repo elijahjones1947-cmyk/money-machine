@@ -202,3 +202,297 @@ table.data-table td {
   color: var(--danger);
   font-size: 13px;
 }
+
+/* --- Visual overhaul (v2): page headers, cards, charts, calendar heatmap,
+   badges. Added on top of the original design system rather than
+   replacing it -- existing .metric/.pill/.button/.data-table usages
+   (widgets, Settings, backtest pages) are untouched and still work. --- */
+
+.page-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+}
+
+.page-header h1 {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.page-subtitle {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-top: 4px;
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 18px;
+}
+
+.section {
+  margin-bottom: 32px;
+}
+
+.section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+  margin: 0 0 12px;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 14px;
+}
+
+.stat-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.stat-card .metric-value {
+  font-size: 24px;
+}
+
+.two-col-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 900px) {
+  .two-col-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Table wrapped in a card: rounded corners, hover rows, tabular numerals
+   for anything numeric, sticky header for long trade histories. */
+.table-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.table-card .data-table {
+  font-variant-numeric: tabular-nums;
+}
+
+.table-card .data-table th {
+  position: sticky;
+  top: 0;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+}
+
+.table-card .data-table tbody tr {
+  transition: background 0.1s;
+}
+
+.table-card .data-table tbody tr:hover {
+  background: var(--bg-elevated);
+}
+
+.table-card .data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table-scroll {
+  max-height: 520px;
+  overflow-y: auto;
+}
+
+.action-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.action-badge.buy {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.action-badge.sell {
+  background: var(--danger-dim);
+  color: var(--danger);
+}
+
+.regime-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: capitalize;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+.chart-legend {
+  display: flex;
+  gap: 16px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  flex-wrap: wrap;
+}
+
+.legend-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+}
+
+.chart-x-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+.chart-y-labels {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: right;
+  padding-right: 8px;
+}
+
+/* --- Bar breakdown chart (win/loss by regime, by symbol) --- */
+.bar-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.bar-breakdown-row {
+  display: grid;
+  grid-template-columns: 90px 1fr 64px;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+
+.bar-breakdown-label {
+  color: var(--text-secondary);
+  text-transform: capitalize;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-breakdown-track {
+  position: relative;
+  height: 18px;
+  background: var(--bg-elevated);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.bar-breakdown-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 4px;
+}
+
+.bar-breakdown-fill.win {
+  background: var(--accent);
+  left: 50%;
+}
+
+.bar-breakdown-fill.loss {
+  background: var(--danger);
+  right: 50%;
+}
+
+.bar-breakdown-center {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: var(--border);
+}
+
+.bar-breakdown-value {
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Calendar heatmap --- */
+.heatmap-wrap {
+  display: flex;
+  gap: 3px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.heatmap-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.heatmap-cell {
+  width: 13px;
+  height: 13px;
+  border-radius: 3px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.heatmap-cell[data-level='win-1'] { background: var(--accent-dim); border-color: transparent; }
+.heatmap-cell[data-level='win-2'] { background: color-mix(in srgb, var(--accent) 55%, var(--bg-card)); border-color: transparent; }
+.heatmap-cell[data-level='win-3'] { background: var(--accent); border-color: transparent; }
+.heatmap-cell[data-level='loss-1'] { background: var(--danger-dim); border-color: transparent; }
+.heatmap-cell[data-level='loss-2'] { background: color-mix(in srgb, var(--danger) 55%, var(--bg-card)); border-color: transparent; }
+.heatmap-cell[data-level='loss-3'] { background: var(--danger); border-color: transparent; }
+
+.heatmap-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 10px;
+}
+
+.hermes-summary-card {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}

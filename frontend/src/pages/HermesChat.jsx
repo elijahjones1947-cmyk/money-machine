@@ -26,11 +26,8 @@ export function HermesChat() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, pendingAction]);
 
-  const send = async (e) => {
-    e.preventDefault();
-    const text = input.trim();
+  const sendText = async (text) => {
     if (!text || sending) return;
-    setInput('');
     setError(null);
     setMessages((m) => [...m, { role: 'user', text }]);
     setSending(true);
@@ -44,6 +41,17 @@ export function HermesChat() {
       setSending(false);
     }
   };
+
+  const send = async (e) => {
+    e.preventDefault();
+    const text = input.trim();
+    if (!text) return;
+    setInput('');
+    await sendText(text);
+  };
+
+  const requestDailySummary = () =>
+    sendText("Give me my daily summary — check the bot's running properly and explain today's gains or losses.");
 
   const respondToPending = async (approve) => {
     setSending(true);
@@ -73,7 +81,15 @@ export function HermesChat() {
 
   return (
     <div className="hermes-page">
-      <h2>Hermes</h2>
+      <div className="page-header">
+        <div>
+          <h1>Hermes</h1>
+          <div className="page-subtitle">Chat, plus pause/resume and risk-limit changes (confirm-gated).</div>
+        </div>
+        <button className="button" disabled={sending || !!pendingAction} onClick={requestDailySummary}>
+          Daily summary
+        </button>
+      </div>
       <div className="hermes-messages">
         {messages.length === 0 && (
           <div className="empty-state">Ask about your portfolio, positions, risk state, or regime.</div>
