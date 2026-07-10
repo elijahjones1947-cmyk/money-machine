@@ -3,7 +3,6 @@ import { RiskWidget } from './RiskWidget.jsx';
 import { TradeLogWidget } from './TradeLogWidget.jsx';
 import { RegimeWidget } from './RegimeWidget.jsx';
 import { BacktestWidget } from './BacktestWidget.jsx';
-import { EarningsWidget } from './EarningsWidget.jsx';
 import { HermesControlWidget } from './HermesControlWidget.jsx';
 import { EquityWidget } from './EquityWidget.jsx';
 
@@ -16,8 +15,7 @@ export const WIDGET_REGISTRY = {
   risk: { title: 'Risk state', Component: RiskWidget, to: '/risk', defaultSize: { w: 3, h: 4 } },
   tradelog: { title: 'Trade log', Component: TradeLogWidget, to: '/trades', defaultSize: { w: 3, h: 4 } },
   regime: { title: 'Regime', Component: RegimeWidget, to: '/regime', defaultSize: { w: 3, h: 4 } },
-  earnings: { title: 'Earnings calendar', Component: EarningsWidget, to: '/earnings', defaultSize: { w: 3, h: 4 } },
-  backtest: { title: 'Backtest results', Component: BacktestWidget, to: '/backtest', defaultSize: { w: 3, h: 4 } },
+  backtest: { title: 'Backtest & live', Component: BacktestWidget, to: '/backtest', defaultSize: { w: 3, h: 4 } },
   hermes: { title: 'Hermes', Component: HermesControlWidget, to: null, defaultSize: { w: 3, h: 4 } },
   equity: { title: 'Equity', Component: EquityWidget, to: '/equity', defaultSize: { w: 3, h: 4 } },
 };

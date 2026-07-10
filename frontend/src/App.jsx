@@ -11,7 +11,6 @@ import { RiskDetail } from './pages/RiskDetail.jsx';
 import { TradeLogDetail } from './pages/TradeLogDetail.jsx';
 import { RegimeDetail } from './pages/RegimeDetail.jsx';
 import { BacktestDetail } from './pages/BacktestDetail.jsx';
-import { EarningsDetail } from './pages/EarningsDetail.jsx';
 import { HermesChat } from './pages/HermesChat.jsx';
 import { Settings } from './pages/Settings.jsx';
 
@@ -30,7 +29,6 @@ function AppShell({ theme, onThemeChange }) {
           <Route path="/trades" element={<TradeLogDetail />} />
           <Route path="/regime" element={<RegimeDetail />} />
           <Route path="/backtest" element={<BacktestDetail />} />
-          <Route path="/earnings" element={<EarningsDetail />} />
           <Route path="/hermes" element={<HermesChat />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
