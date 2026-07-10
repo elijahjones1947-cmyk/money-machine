@@ -12,6 +12,7 @@ from brokers.oanda_broker import OandaBroker
 from risk.risk_manager import RiskManager
 from hermes import hermes_bp, init_hermes
 from backtest.metrics import compute_metrics
+from backtest.strategy import compute_signals
 import json
 import os
 
@@ -237,6 +238,54 @@ def _get_held_qty(broker, symbol):
     except BrokerConnectionError as e:
         logging.warning("Could not check held position for {}: {}".format(symbol, e))
     return 0.0
+
+
+def _sanity_check_signal(broker, symbol, asset_class, action):
+    """Defense in depth: independently recompute the Higher High
+    Breakout strategy's signal for `symbol` RIGHT NOW using the same
+    Python port the backtester uses (backtest/strategy.py), and log a
+    warning if it disagrees with the action an incoming webhook just
+    claimed TradingView's own Pine Script fired.
+
+    This does NOT block the trade -- it's purely observational. Two
+    reasons it's log-only rather than a hard gate: (1) subtle timing/
+    bar-close differences between this call and whatever bar Pine
+    Script actually evaluated on can cause a disagreement even when
+    both are "correct" for the instant they each looked at, and (2) it
+    assumes the live TradingView alert is running on the SAME timeframe
+    as _REGIME_TIMEFRAMES assumes for this asset class -- if it isn't,
+    every comparison here is meaningless noise, not a real problem.
+    Treat a logged disagreement as "worth a look", not "the bot is
+    broken".
+
+    Never raises -- any failure here (broker error, not enough bars,
+    etc.) is logged and swallowed so this can never be the reason a
+    real trade signal fails to execute.
+    """
+    try:
+        timeframe = _REGIME_TIMEFRAMES.get(asset_class, "1h")
+        bars = broker.get_ohlcv(symbol, timeframe=timeframe, limit=100)
+        if len(bars) < 40:  # not enough history to warm up EMA-slow(21)/RSI(14)/lookback(10) reliably
+            return
+        signals = compute_signals(bars)
+        latest = signals[-1]
+
+        if action == "buy" and not latest["buy_condition"]:
+            logging.warning(
+                "SANITY CHECK: webhook says BUY {} but the Python strategy port doesn't currently see a buy "
+                "condition on the {} timeframe (ema_fast={}, ema_slow={}, rsi={}, breakout_price={}). "
+                "Not blocking the trade -- just flagging a possible signal/timeframe mismatch.".format(
+                    symbol, timeframe, latest["ema_fast"], latest["ema_slow"], latest["rsi"], latest["breakout_price"],
+                )
+            )
+        elif action == "sell" and not latest["sell_signal"]:
+            logging.warning(
+                "SANITY CHECK: webhook says SELL {} but the Python strategy port doesn't currently see its "
+                "momentum-exit condition on the {} timeframe (ema_fast={}, close vs ema_fast trend flip check). "
+                "Not blocking the trade -- just flagging a possible signal/timeframe mismatch.".format(symbol, timeframe)
+            )
+    except Exception as e:
+        logging.warning("Sanity check skipped for {} {}: {}".format(action, symbol, e))
 
 
 def get_all_positions():
@@ -584,6 +633,9 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
             if now - state.last_signal_time[signal_key] < 60:
                 return jsonify({'status': 'duplicate ignored'}), 200
     state.last_signal_time[signal_key] = now
+
+    if not is_manual and not is_forced_close:
+        _sanity_check_signal(broker, symbol, asset_class, action)
 
     try:
         account = broker.get_account_info()
