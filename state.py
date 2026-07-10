@@ -32,3 +32,15 @@ trades_today = {"stock": 0, "forex": 0, "crypto": 0}
 risk_caps = {}
 
 current_day = None  # used to detect day rollover and reset daily counters
+
+# Rolling timestamps of failed auth attempts (dashboard login secret,
+# webhook secret) -- used only to log escalating warnings on repeated
+# failures, NOT to auto-block further attempts. Deliberately not a
+# hard lockout: a lockout that blocks the webhook path on repeated
+# failures risks self-inflicted denial of service (e.g. a secret
+# rotation gone slightly wrong, or TradingView retrying a stale alert
+# repeatedly) blocking REAL trade signals right when they matter --
+# worse than the brute-force risk it would guard against for a
+# single-user bot. See server.py's _record_failed_attempt.
+failed_login_attempts = []
+failed_webhook_attempts = []

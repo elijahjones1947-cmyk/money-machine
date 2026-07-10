@@ -104,6 +104,22 @@ def get_risk_config():
     return RISK_CONFIG[TRADING_MODE]
 
 
+# Official list TradingView publishes for webhook-sending IPs (verified
+# against https://www.tradingview.com/support/solutions/43000529348-how-to-configure-webhook-alerts/
+# directly, not copied from a third party -- re-check that page if this
+# ever needs updating, TradingView could change it without much notice).
+TRADINGVIEW_WEBHOOK_IPS = {"52.89.214.238", "34.212.75.30", "54.218.53.128", "52.32.178.7"}
+
+# 'off' (default): no IP check at all.
+# 'log': compute whether the request's IP would pass the allowlist and
+#        log a warning if not, but NEVER reject -- use this first to
+#        confirm Railway is forwarding the real client IP correctly
+#        (X-Forwarded-For) before trusting it, since getting this wrong
+#        would otherwise silently block every real trade signal.
+# 'enforce': actually reject requests from IPs outside the allowlist.
+WEBHOOK_IP_MODE = optional_env("WEBHOOK_IP_MODE", "off").lower()
+
+
 # Regime classifier thresholds. ADX is a normalized 0-100 measure of trend
 # strength, so the standard Wilder threshold (25 = strong trend) applies
 # the same way across every asset class — no need to tune it per-asset.

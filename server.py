@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, session, send_from_directory
-import logging, time, datetime, math, copy
+import logging, time, datetime, math, copy, hmac
 
 import config
 import state
@@ -238,6 +238,40 @@ scheduler.start()
 # --- end market regime classifier scheduler ------------------------------
 
 
+# Escalating-visibility-only failed-auth tracking -- see state.py's
+# failed_login_attempts/failed_webhook_attempts docstring for why this
+# deliberately does NOT auto-block anything. _LOCKOUT_WINDOW_SECONDS is
+# just the window failures are counted/reported over, not a lockout
+# duration (nothing here locks anyone out).
+_FAILED_ATTEMPT_WINDOW_SECONDS = 900  # 15 minutes
+
+
+def _record_failed_attempt(attempts_list):
+    """Appends now(), prunes anything outside the window, and returns
+    the count still in-window -- used to log an increasingly loud
+    warning the more failures pile up recently."""
+    now = time.time()
+    attempts_list.append(now)
+    cutoff = now - _FAILED_ATTEMPT_WINDOW_SECONDS
+    while attempts_list and attempts_list[0] < cutoff:
+        attempts_list.pop(0)
+    return len(attempts_list)
+
+
+def _get_client_ip():
+    """Best-effort real client IP behind Railway's reverse proxy.
+    X-Forwarded-For's FIRST entry is the original client when set by a
+    well-behaved proxy; falls back to Flask's own request.remote_addr
+    (which, behind a proxy, is usually the proxy's own IP, not the real
+    client -- exactly why WEBHOOK_IP_MODE defaults to 'off' and has a
+    'log' shadow mode: verify this actually resolves to TradingView's
+    real IPs in Railway's setup before ever enforcing on it)."""
+    forwarded = request.headers.get('X-Forwarded-For')
+    if forwarded:
+        return forwarded.split(',')[0].strip()
+    return request.remote_addr
+
+
 def asset_class_for_symbol(symbol):
     """Crypto pairs use Alpaca's slash format, e.g. BTC/USD.
     Forex pairs use OANDA's underscore format, e.g. EUR_USD.
@@ -398,9 +432,18 @@ def check_daily_rollover():
 @app.route('/api/login', methods=['POST'])
 def api_login():
     data = request.json or {}
-    if data.get('password') == DASHBOARD_PASSWORD:
+    # Constant-time comparison -- a plain == leaks timing information
+    # proportional to how many leading characters match, which is a
+    # real (if slow/impractical) attack against a string compared over
+    # the network repeatedly. hmac.compare_digest closes that off for
+    # free.
+    if hmac.compare_digest(str(data.get('password', '')), DASHBOARD_PASSWORD):
+        state.failed_login_attempts.clear()
         session['auth'] = True
         return jsonify({'status': 'ok'})
+    count = _record_failed_attempt(state.failed_login_attempts)
+    log_level = logging.ERROR if count >= 5 else logging.WARNING
+    logging.log(log_level, 'Failed dashboard login attempt ({} in the last {} min)'.format(count, _FAILED_ATTEMPT_WINDOW_SECONDS // 60))
     return jsonify({'error': 'invalid password'}), 401
 
 
@@ -622,9 +665,30 @@ def webhook():
     if not data:
         logging.warning('Rejected webhook call: no JSON body')
         return jsonify({'error': 'no data'}), 415
-    if data.get('secret') != WEBHOOK_SECRET:
-        logging.warning('Rejected webhook call: bad secret')
+    # Constant-time comparison, same reasoning as /api/login. Note this
+    # can't be a real HMAC signature (TradingView alerts send a fixed,
+    # static message body defined when the alert is created -- there's
+    # no way for TradingView to compute a per-request signature at fire
+    # time), so a shared secret string is the strongest auth this
+    # webhook can realistically have. Deliberately not locking out
+    # after repeated failures either -- see state.py's
+    # failed_webhook_attempts docstring for why that risks blocking
+    # real trade signals.
+    if not hmac.compare_digest(str(data.get('secret', '')), WEBHOOK_SECRET):
+        count = _record_failed_attempt(state.failed_webhook_attempts)
+        log_level = logging.ERROR if count >= 5 else logging.WARNING
+        logging.log(log_level, 'Rejected webhook call: bad secret ({} failed attempts in the last {} min)'.format(count, _FAILED_ATTEMPT_WINDOW_SECONDS // 60))
         return jsonify({'error': 'unauthorized'}), 401
+    state.failed_webhook_attempts.clear()
+
+    if config.WEBHOOK_IP_MODE in ('log', 'enforce'):
+        client_ip = _get_client_ip()
+        if client_ip not in config.TRADINGVIEW_WEBHOOK_IPS:
+            msg = "Webhook call from {} is not in TradingView's published IP list".format(client_ip)
+            if config.WEBHOOK_IP_MODE == 'enforce':
+                logging.warning(msg + ' -- rejecting (WEBHOOK_IP_MODE=enforce)')
+                return jsonify({'error': 'unauthorized'}), 401
+            logging.warning(msg + ' -- NOT rejecting (WEBHOOK_IP_MODE=log, shadow mode only)')
 
     action = data.get('action')
     symbol = data.get('symbol')
