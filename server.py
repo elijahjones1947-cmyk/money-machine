@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, session, send_from_directory
-import logging, time, datetime, math
+import logging, time, datetime, math, copy
 
 import config
 import state
@@ -47,7 +47,17 @@ oanda_broker = OandaBroker(
 
 BROKERS = {"stock": alpaca_broker, "forex": oanda_broker, "crypto": alpaca_broker}
 
-risk_manager = RiskManager(config.get_risk_config())
+# state.risk_caps starts as a deep copy of config.py's hardcoded defaults
+# (never the SAME object as config.RISK_CONFIG -- config.py should stay
+# untouched compile-time defaults, not something runtime settings changes
+# mutate underneath it), then load_persisted_state() below merges in any
+# saved overrides. RiskManager holds this exact dict object (not a copy
+# of it), so a Settings change that mutates state.risk_caps in place is
+# immediately what the risk manager enforces too -- one dict, not two
+# numbers that can silently drift apart. See risk/risk_manager.py and
+# the Settings API route for the other half of this.
+state.risk_caps = copy.deepcopy(config.get_risk_config())
+risk_manager = RiskManager(state.risk_caps)
 
 # Hermes stays disabled (its routes return 503) if ANTHROPIC_API_KEY is
 # not set -- see hermes.py's init_hermes().
@@ -76,6 +86,19 @@ def load_persisted_state():
         saved_max = db.get_setting("max_trades_per_day")
         if saved_max:
             state.max_trades_per_day.update(saved_max)
+
+        # Merge per-asset-class, not replace wholesale -- state.risk_caps
+        # already has every key config.py currently defines (deep-copied
+        # before this runs); a persisted blob saved before a new key like
+        # safety_stop_loss_pct existed shouldn't wipe it back out to
+        # missing when merged, and RiskManager holds this exact dict
+        # object, so mutating it in place (not reassigning state.risk_caps)
+        # is what keeps risk_manager.config in sync.
+        saved_risk_caps = db.get_setting("risk_caps")
+        if saved_risk_caps:
+            for ac, overrides in saved_risk_caps.items():
+                if ac in state.risk_caps:
+                    state.risk_caps[ac].update(overrides)
 
         saved_enabled = db.get_setting("bot_enabled")
         if saved_enabled is not None:
@@ -488,7 +511,7 @@ def api_dashboard():
             'best_trade': best_trade, 'worst_trade': worst_trade,
         },
         'regimes': regimes,
-        'risk_caps': config.get_risk_config(),
+        'risk_caps': state.risk_caps,  # live/editable, not the static config.py defaults -- see Settings
     })
 
 
@@ -502,6 +525,26 @@ def toggle_bot():
     except Exception as e:
         logging.warning('Could not persist bot_enabled to DB: {}'.format(e))
     return jsonify({'enabled': state.bot_enabled})
+
+
+# Fields in state.risk_caps a Settings request is allowed to change.
+# The three *_pct fields are stored internally as FRACTIONS (0.02 =
+# 2%, matching config.py's convention and everything that reads
+# state.risk_caps), but the API/UI convention everywhere else in this
+# app (risk_percent, the Settings sliders) is a plain percentage
+# number (2, not 0.02) -- so those three divide by 100 on the way in.
+# max_open_positions/max_leverage aren't percentages and pass through
+# as-is. max_leverage is forex-only (crypto/stock configs simply omit
+# the key -- see config.py) but included here uniformly; setting it
+# for stock/crypto is harmless since nothing reads it for those asset
+# classes.
+_RISK_CAP_FIELDS = {
+    'max_position_size_pct': lambda v: float(v) / 100.0,
+    'max_daily_loss_pct': lambda v: float(v) / 100.0,
+    'safety_stop_loss_pct': lambda v: float(v) / 100.0,
+    'max_open_positions': lambda v: int(v),
+    'max_leverage': lambda v: float(v),
+}
 
 
 @app.route('/api/settings', methods=['POST'])
@@ -524,6 +567,21 @@ def settings():
             db.save_setting('max_trades_per_day', state.max_trades_per_day)
         except Exception as e:
             logging.warning('Could not persist max_trades_per_day to DB: {}'.format(e))
+
+    risk_caps_changed = False
+    for field, coerce in _RISK_CAP_FIELDS.items():
+        if field in data:
+            try:
+                state.risk_caps[asset_class][field] = coerce(data[field])
+                risk_caps_changed = True
+            except (TypeError, ValueError):
+                return jsonify({'error': 'invalid value for {}'.format(field)}), 400
+    if risk_caps_changed:
+        try:
+            db.save_setting('risk_caps', state.risk_caps)
+        except Exception as e:
+            logging.warning('Could not persist risk_caps to DB: {}'.format(e))
+
     return jsonify({'status': 'updated'})
 
 
@@ -641,6 +699,25 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
         account = broker.get_account_info()
         price = broker.get_price(symbol)
         risk_amount = account['equity'] * (state.risk_percent[asset_class] / 100.0)
+
+        # Defensively clamp to the cap rather than let a drifted
+        # risk_percent silently reject every trade for this asset class
+        # -- this is exactly the failure mode that caused a real 2-day
+        # forex outage (risk_percent had drifted above the cap; every
+        # trade got rejected with no obvious reason until the sizing
+        # knob was manually lowered). Sizing down to the cap and logging
+        # it is strictly better than rejecting outright: the trade still
+        # happens, just smaller than requested, and it's visible in the
+        # logs instead of silent.
+        max_position_value = account['equity'] * state.risk_caps[asset_class]['max_position_size_pct']
+        if risk_amount > max_position_value:
+            logging.warning(
+                'Clamping {} {} position size: risk_percent ({}%) implies ${:.2f} but the cap allows ${:.2f} -- sizing to the cap instead of rejecting.'.format(
+                    asset_class, symbol, state.risk_percent[asset_class], risk_amount, max_position_value,
+                )
+            )
+            risk_amount = max_position_value
+
         reduces_position = False
 
         if is_forced_close:

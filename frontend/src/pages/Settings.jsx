@@ -5,21 +5,70 @@ import './Settings.css';
 
 const ASSET_CLASSES = ['stock', 'forex', 'crypto'];
 
-function RiskRow({ assetClass, currentRiskPercent, currentMaxTrades, capPct }) {
-  const [riskPercent, setRiskPercent] = useState(currentRiskPercent);
-  const [maxTrades, setMaxTrades] = useState(currentMaxTrades);
+function Field({ label, value, onChange, borderColor }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{label}</label>
+      <input
+        type="number" step="0.5" value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={{ background: 'var(--bg)', border: `1px solid ${borderColor || 'var(--border)'}`, color: 'var(--text-primary)', padding: '6px 8px', borderRadius: 8, width: '100%' }}
+      />
+    </div>
+  );
+}
+
+// One card per asset class covering every risk lever the bot actually
+// enforces -- previously only risk_percent/max_trades_per_day were
+// editable here; max_position_size_pct (the cap), max_daily_loss_pct,
+// max_open_positions, max_leverage, and safety_stop_loss_pct lived only
+// in hardcoded config.py, invisible from the dashboard and only
+// changeable by editing code and redeploying. That split (one visible
+// number, several invisible ones) is what let risk_percent silently
+// drift above the cap for two days before anyone noticed.
+function RiskCard({ assetClass, data, onSaved }) {
+  const caps = data.risk_caps?.[assetClass] || {};
+  const toPct = (v) => (v != null ? v * 100 : '');
+
+  const [riskPercent, setRiskPercent] = useState(data.risk_percent[assetClass]);
+  const [maxTrades, setMaxTrades] = useState(data.max_trades_per_day[assetClass]);
+  const [maxPositionPct, setMaxPositionPct] = useState(toPct(caps.max_position_size_pct));
+  const [maxDailyLossPct, setMaxDailyLossPct] = useState(toPct(caps.max_daily_loss_pct));
+  const [maxOpenPositions, setMaxOpenPositions] = useState(caps.max_open_positions ?? '');
+  const [safetyStopPct, setSafetyStopPct] = useState(toPct(caps.safety_stop_loss_pct));
+  const [maxLeverage, setMaxLeverage] = useState(caps.max_leverage ?? '');
   const [status, setStatus] = useState(null);
 
-  useEffect(() => setRiskPercent(currentRiskPercent), [currentRiskPercent]);
-  useEffect(() => setMaxTrades(currentMaxTrades), [currentMaxTrades]);
+  useEffect(() => {
+    const c = data.risk_caps?.[assetClass] || {};
+    setRiskPercent(data.risk_percent[assetClass]);
+    setMaxTrades(data.max_trades_per_day[assetClass]);
+    setMaxPositionPct(toPct(c.max_position_size_pct));
+    setMaxDailyLossPct(toPct(c.max_daily_loss_pct));
+    setMaxOpenPositions(c.max_open_positions ?? '');
+    setSafetyStopPct(toPct(c.safety_stop_loss_pct));
+    setMaxLeverage(c.max_leverage ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, assetClass]);
 
-  const overCap = capPct != null && Number(riskPercent) > capPct;
+  const overCap = maxPositionPct !== '' && Number(riskPercent) > Number(maxPositionPct);
 
   const save = async () => {
     setStatus('saving');
     try {
-      await api.updateSettings({ asset_class: assetClass, risk_percent: Number(riskPercent), max_trades_per_day: Number(maxTrades) });
+      const payload = {
+        asset_class: assetClass,
+        risk_percent: Number(riskPercent),
+        max_trades_per_day: Number(maxTrades),
+        max_position_size_pct: Number(maxPositionPct),
+        max_daily_loss_pct: Number(maxDailyLossPct),
+        max_open_positions: Number(maxOpenPositions),
+        safety_stop_loss_pct: Number(safetyStopPct),
+      };
+      if (assetClass === 'forex') payload.max_leverage = Number(maxLeverage);
+      await api.updateSettings(payload);
       setStatus('saved');
+      onSaved?.();
       setTimeout(() => setStatus(null), 1500);
     } catch (e) {
       setStatus(e.message);
@@ -27,33 +76,29 @@ function RiskRow({ assetClass, currentRiskPercent, currentMaxTrades, capPct }) {
   };
 
   return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 16, padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
-      <div style={{ width: 70, textTransform: 'capitalize', fontWeight: 600 }}>{assetClass}</div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Risk % per trade</label>
-        <input
-          type="number" step="0.5" value={riskPercent}
-          onChange={(e) => setRiskPercent(e.target.value)}
-          style={{ width: 90, background: 'var(--bg)', border: `1px solid ${overCap ? 'var(--danger)' : 'var(--border)'}`, color: 'var(--text-primary)', padding: '6px 8px', borderRadius: 8 }}
-        />
-        {capPct != null && (
-          <span style={{ fontSize: 11, color: overCap ? 'var(--danger)' : 'var(--text-muted)' }}>
-            {overCap ? `Above the ${capPct}% risk-manager cap — every trade will be rejected` : `cap: ${capPct}%`}
-          </span>
-        )}
+    <div className="card" style={{ marginBottom: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <span style={{ textTransform: 'capitalize', fontWeight: 700, fontSize: 15 }}>{assetClass}</span>
+        <button className="button button-accent" onClick={save} disabled={status === 'saving'}>
+          {status === 'saved' ? 'Saved' : status === 'saving' ? 'Saving…' : 'Save'}
+        </button>
       </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-        <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Max trades/day</label>
-        <input
-          type="number" value={maxTrades}
-          onChange={(e) => setMaxTrades(e.target.value)}
-          style={{ width: 90, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-primary)', padding: '6px 8px', borderRadius: 8 }}
-        />
+      {overCap && (
+        <div style={{ fontSize: 12, color: 'var(--danger)', marginBottom: 10 }}>
+          Risk % ({riskPercent}%) is above the position-size cap ({maxPositionPct}%) — trades get sized down to
+          the cap automatically now, not rejected outright.
+        </div>
+      )}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
+        <Field label="Risk % per trade" value={riskPercent} onChange={setRiskPercent} borderColor={overCap ? 'var(--danger)' : undefined} />
+        <Field label="Max trades/day" value={maxTrades} onChange={setMaxTrades} />
+        <Field label="Position size cap %" value={maxPositionPct} onChange={setMaxPositionPct} borderColor={overCap ? 'var(--danger)' : undefined} />
+        <Field label="Max daily loss %" value={maxDailyLossPct} onChange={setMaxDailyLossPct} />
+        <Field label="Max open positions" value={maxOpenPositions} onChange={setMaxOpenPositions} />
+        <Field label="Safety stop-loss %" value={safetyStopPct} onChange={setSafetyStopPct} />
+        {assetClass === 'forex' && <Field label="Max leverage" value={maxLeverage} onChange={setMaxLeverage} />}
       </div>
-      <button className="button button-accent" onClick={save} disabled={status === 'saving'}>
-        {status === 'saved' ? 'Saved' : status === 'saving' ? 'Saving…' : 'Save'}
-      </button>
-      {status && status !== 'saving' && status !== 'saved' && <span className="error-text">{status}</span>}
+      {status && status !== 'saving' && status !== 'saved' && <div className="error-text" style={{ marginTop: 8 }}>{status}</div>}
     </div>
   );
 }
@@ -103,7 +148,7 @@ export function Settings() {
   if (loading || !data) return <div className="empty-state">Loading…</div>;
 
   return (
-    <div style={{ maxWidth: 640 }}>
+    <div style={{ maxWidth: 720 }}>
       <div className="page-header">
         <div>
           <h1>Settings</h1>
@@ -113,21 +158,15 @@ export function Settings() {
 
       <div className="section">
         <div className="section-title">Risk &amp; sizing</div>
-        <div className="card">
-          <div style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 8 }}>
-            Risk % controls position sizing. If it's set above the risk manager's cap, every trade for that
-            asset class gets silently rejected — this is exactly what caused a 2-day forex outage previously.
-          </div>
-          {ASSET_CLASSES.map((ac) => (
-            <RiskRow
-              key={ac}
-              assetClass={ac}
-              currentRiskPercent={data.risk_percent[ac]}
-              currentMaxTrades={data.max_trades_per_day[ac]}
-              capPct={data.risk_caps?.[ac] ? data.risk_caps[ac].max_position_size_pct * 100 : null}
-            />
-          ))}
+        <div className="page-subtitle" style={{ marginBottom: 12 }}>
+          Every risk lever the bot actually enforces is editable here now — position size cap, max daily loss,
+          max open positions, leverage (forex), and the independent safety stop-loss backstop — not just the
+          sizing percentage. "Safety stop-loss %" is a last-resort auto-exit if a position's unrealized loss
+          blows through this threshold, independent of whether a strategy exit signal ever arrives.
         </div>
+        {ASSET_CLASSES.map((ac) => (
+          <RiskCard key={ac} assetClass={ac} data={data} onSaved={refetch} />
+        ))}
       </div>
 
       <div className="section">
