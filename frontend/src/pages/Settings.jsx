@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useDashboard } from '../hooks/useDashboard.js';
 import { api } from '../api.js';
+import './Settings.css';
 
 const ASSET_CLASSES = ['stock', 'forex', 'crypto'];
 
@@ -26,7 +27,7 @@ function RiskRow({ assetClass, currentRiskPercent, currentMaxTrades, capPct }) {
   };
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 16, padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
+    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 16, padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
       <div style={{ width: 70, textTransform: 'capitalize', fontWeight: 600 }}>{assetClass}</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
         <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Risk % per trade</label>
@@ -84,7 +85,7 @@ function WatchlistRow({ assetClass, symbols, onAdded }) {
             symbols.map((s) => <span key={s} className="pill">{s}</span>)}
         </div>
       </div>
-      <form onSubmit={add} style={{ display: 'flex', gap: 8, marginTop: 8, marginLeft: 82 }}>
+      <form onSubmit={add} className="watchlist-add-form">
         <input
           value={symbol} onChange={(e) => setSymbol(e.target.value)} placeholder="Add symbol…"
           style={{ width: 140, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-primary)', padding: '6px 8px', borderRadius: 8 }}

@@ -3,6 +3,7 @@ import { useDashboard } from '../hooks/useDashboard.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { api } from '../api.js';
 import { ThemeSwitcher } from './ThemeSwitcher.jsx';
+import './TopBar.css';
 
 export function TopBar({ theme, onThemeChange }) {
   const { data, refetch } = useDashboard(0); // no separate poll, just reuse cache-ish fetch on mount
@@ -21,7 +22,7 @@ export function TopBar({ theme, onThemeChange }) {
           <span className={`mode-pill ${data.trading_mode === 'live' ? 'live' : ''}`}>{data.trading_mode}</span>
         )}
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div className="topbar-right">
         <ThemeSwitcher theme={theme} onChange={onThemeChange} />
         {data && (
           <span className="pill">

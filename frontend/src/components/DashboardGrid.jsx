@@ -76,10 +76,10 @@ export function DashboardGrid() {
       <ResponsiveGridLayout
         className="layout"
         layouts={{ lg: layout }}
-        breakpoints={{ lg: 0 }}
-        cols={{ lg: 12 }}
+        breakpoints={{ lg: 1200, md: 900, sm: 640, xxs: 0 }}
+        cols={{ lg: 12, md: 12, sm: 6, xxs: 1 }}
+        margin={{ lg: [16, 16], md: [16, 16], sm: [12, 12], xxs: [10, 10] }}
         rowHeight={70}
-        margin={[16, 16]}
         isDraggable={editMode}
         isResizable={editMode}
         draggableHandle=".widget-drag-handle"
