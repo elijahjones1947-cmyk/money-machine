@@ -156,6 +156,20 @@ def asset_class_for_symbol(symbol):
     return "stock"
 
 
+def _get_held_qty(broker, symbol):
+    """Current held quantity for `symbol` on an Alpaca-backed broker
+    (stock/crypto), or 0.0 if the bot doesn't currently hold a position
+    in it. Used to gate sells to what's actually held -- see
+    _process_trade_signal."""
+    try:
+        for p in broker.get_positions():
+            if p.symbol == symbol:
+                return float(p.qty)
+    except BrokerConnectionError as e:
+        logging.warning("Could not check held position for {}: {}".format(symbol, e))
+    return 0.0
+
+
 def get_combined_equity():
     """Best-effort combined equity across DISTINCT brokers. Stock and
     crypto share the same Alpaca account/equity, so we dedupe by broker
@@ -452,7 +466,24 @@ def _process_trade_signal(action, symbol, is_manual):
         price = broker.get_price(symbol)
         risk_amount = account['equity'] * (state.risk_percent[asset_class] / 100.0)
 
-        if asset_class == 'stock':
+        if action == 'sell' and asset_class in ('stock', 'crypto'):
+            # Alpaca is spot-only for crypto (no shorting), and we don't
+            # want naked shorts on stock either -- a sell should close
+            # whatever the bot's REAL account actually holds, not
+            # re-derive a fresh size from the risk formula (which can
+            # easily exceed, or have nothing to do with, the real
+            # position). Without this check, a sell signal firing when
+            # the bot doesn't actually hold anything -- e.g. because an
+            # earlier buy silently failed and TradingView's OWN strategy
+            # simulation drifted out of sync with the real account --
+            # sends a doomed order straight to the broker instead of
+            # failing with a clear reason.
+            held_qty = _get_held_qty(broker, symbol)
+            if held_qty <= 0:
+                logging.warning('Rejected sell {} {}: bot holds no position to sell'.format(asset_class, symbol))
+                return jsonify({'error': 'no position to sell for {} (bot holds none)'.format(symbol)}), 400
+            size = held_qty
+        elif asset_class == 'stock':
             size = int(risk_amount / price)
             if size < 1:
                 logging.warning('Rejected {} stock {}: position too small (risk_amount={:.2f}, price={:.2f})'.format(action, symbol, risk_amount, price))
