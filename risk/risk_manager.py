@@ -55,18 +55,29 @@ class RiskManager:
             return False, "{} daily loss limit exceeded, halting {} only".format(asset_class, asset_class)
 
         # position size cap — use the caller's price snapshot if given,
-        # so sizing and validation agree even on fast-moving assets
+        # so sizing and validation agree even on fast-moving assets.
+        # Skipped for sells: this cap exists to stop OPENING an
+        # oversized position, not to block CLOSING one you already
+        # hold. A sell sized to your actual held quantity (see
+        # server.py's _get_held_qty) can legitimately be worth more
+        # than max_position_size_pct if equity has since dropped or the
+        # position was opened before risk settings changed -- refusing
+        # to let you close it in that case is backwards from a risk
+        # management standpoint.
         if price is None:
             price = broker.get_price(symbol)
         position_value = float(size) * price
         max_allowed = account["equity"] * rules["max_position_size_pct"]
-        if position_value > max_allowed:
+        if side != "sell" and position_value > max_allowed:
             return False, "Position too big: ${:.2f} > max ${:.2f}".format(position_value, max_allowed)
 
-        # max open positions
-        current_positions = broker.get_positions()
-        if len(current_positions) >= rules["max_open_positions"]:
-            return False, "Max open positions reached for {}".format(asset_class)
+        # max open positions — same reasoning: closing a position never
+        # increases your open-position count, so a sell shouldn't be
+        # blocked by a cap meant to stop opening MORE positions.
+        if side != "sell":
+            current_positions = broker.get_positions()
+            if len(current_positions) >= rules["max_open_positions"]:
+                return False, "Max open positions reached for {}".format(asset_class)
 
         # leverage check (mainly relevant for forex; crypto/stock configs
         # simply omit max_leverage, so this is skipped for them)
