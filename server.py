@@ -140,7 +140,15 @@ def run_regime_checks():
 
 
 scheduler = BackgroundScheduler(daemon=True)
-scheduler.add_job(run_regime_checks, "interval", minutes=15, next_run_time=None)
+# next_run_time defaults to "now" for an interval trigger when omitted,
+# so this fires an immediate first check on boot, then every 15 minutes
+# after. A previous version passed next_run_time=None here, which in
+# APScheduler means "add this job PAUSED" -- nothing ever resumed it,
+# so this job silently never ran even once, market_regime stayed
+# permanently empty, and every regime lookup (dashboard widget, trade
+# tagging) fell back to "unknown" forever. That's the actual root
+# cause of regime always showing unknown, not a classification bug.
+scheduler.add_job(run_regime_checks, "interval", minutes=15, next_run_time=datetime.datetime.now())
 scheduler.start()
 # --- end market regime classifier scheduler ------------------------------
 
