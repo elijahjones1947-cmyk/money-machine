@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 backtest_results.json
 frontend/node_modules/
+.pytest_cache/

@@ -1,0 +1,6 @@
+# Test/dev-only dependencies -- NOT installed in production (Railway's
+# build only installs requirements.txt). Install locally with:
+#   pip install -r requirements.txt -r requirements-dev.txt
+# Run tests with:
+#   pytest
+pytest
