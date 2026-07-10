@@ -5,6 +5,25 @@
   max-width: 720px;
 }
 
+@media (max-width: 640px) {
+  .hermes-page {
+    /* Topbar wraps to two rows + page-content padding shrinks on
+       phone widths -- give the chat column a bit more breathing room
+       accounted for than the desktop constant above. */
+    height: calc(100vh - 200px);
+  }
+
+  .hermes-message {
+    max-width: 92%;
+    font-size: 13px;
+  }
+
+  .hermes-pending,
+  .hermes-not-configured {
+    max-width: 100%;
+  }
+}
+
 .hermes-messages {
   flex: 1;
   overflow-y: auto;

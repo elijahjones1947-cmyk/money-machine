@@ -496,3 +496,71 @@ table.data-table td {
   line-height: 1.6;
   color: var(--text-primary);
 }
+
+/* --- Mobile pass --- */
+
+/* Any table wrapped in .table-card scrolls horizontally instead of
+   blowing out the page width -- matters most for the wide Trade
+   History / Backtest tables on phone screens. */
+.table-card {
+  overflow-x: auto;
+}
+
+@media (max-width: 640px) {
+  .page-content {
+    padding: 16px;
+  }
+
+  .page-header {
+    margin-bottom: 18px;
+  }
+
+  .page-header h1 {
+    font-size: 21px;
+  }
+
+  .metric-value {
+    font-size: 30px;
+  }
+
+  .stat-card .metric-value {
+    font-size: 20px;
+  }
+
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .card {
+    padding: 14px;
+  }
+
+  .section {
+    margin-bottom: 22px;
+  }
+
+  .widget-tray {
+    left: 12px;
+    right: 12px;
+    transform: none;
+    max-width: none;
+    bottom: max(16px, env(safe-area-inset-bottom));
+    justify-content: center;
+  }
+
+  .login-card {
+    width: 100%;
+    max-width: 320px;
+    padding: 24px;
+  }
+
+  table.data-table {
+    font-size: 12px;
+  }
+
+  table.data-table th,
+  table.data-table td {
+    padding: 7px 8px;
+  }
+}
