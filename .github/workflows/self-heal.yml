@@ -90,11 +90,6 @@ jobs:
           # docs/setup.md in anthropics/claude-code-action.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           base_branch: main
-          # TEMPORARY, left on from the same debugging session: the action
-          # hides Claude's stderr by default, and this is what surfaced the
-          # billing_error above. Remove once a dry run succeeds end-to-end
-          # with the OAuth token.
-          show_full_output: true
           prompt: |
             A critical alert just fired in production for the "money-machine" automated
             trading bot (Flask backend + APScheduler background jobs; see CLAUDE.md at the
