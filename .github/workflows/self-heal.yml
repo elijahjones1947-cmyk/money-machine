@@ -82,6 +82,11 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           base_branch: main
+          # TEMPORARY, for debugging the 2026-07-12 dry-run failure (instant
+          # is_error:true, 0 turns of real work, total_cost_usd:0 -- points at
+          # a claude_args parse failure, but the action hides stderr by
+          # default). Remove once the underlying cause is fixed and confirmed.
+          show_full_output: true
           prompt: |
             A critical alert just fired in production for the "money-machine" automated
             trading bot (Flask backend + APScheduler background jobs; see CLAUDE.md at the
