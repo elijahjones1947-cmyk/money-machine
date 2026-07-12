@@ -6,8 +6,9 @@ methods, not mocks of db.py's/server.py's own functions).
 
 Covers: /api/dashboard, /api/login (valid/invalid password, failed-attempt
 tracking), /webhook (valid secret, invalid secret, WEBHOOK_IP_MODE
-allowlist behavior), /api/settings (risk_caps persistence), and
-/api/backtest (live_performance present).
+allowlist behavior, dedup-stamp rollback on failed attempts, duplicate
+drop of a genuinely successful signal), /api/settings (risk_caps
+persistence), and /api/backtest (live_performance present).
 
 NOT covered: /api/manual_trade, /api/watchlist, /ui/layout, Hermes's
 routes -- these share the same _process_trade_signal/db plumbing
@@ -17,8 +18,10 @@ grows further.
 """
 
 import json
+import logging
 
 import config
+from errors import BrokerConnectionError
 
 
 def test_login_valid_password_succeeds(client):
@@ -70,6 +73,80 @@ def test_webhook_invalid_secret_tracks_failed_attempts(client):
     for _ in range(3):
         client.post("/webhook", json={"secret": "wrong", "action": "buy", "symbol": "AAPL"})
     assert len(state.failed_webhook_attempts) == 3
+
+
+def test_webhook_retry_after_broker_failure_succeeds(client, monkeypatch):
+    """A failed attempt must NOT leave the 60s dedup stamp behind: if the
+    broker errors on the first try, TradingView's retry of the same alert
+    within the window has to actually execute -- the original bug was the
+    retry coming back 200 'duplicate ignored' with the signal never traded
+    and nothing in the logs."""
+    import server
+    import state
+
+    calls = []
+
+    def flaky_place_order(symbol, side, size, order_type="market"):
+        calls.append((symbol, side, size))
+        if len(calls) == 1:
+            raise BrokerConnectionError("alpaca unreachable")
+        return {"id": "fake-order-id", "status": "filled"}
+
+    monkeypatch.setattr(server.alpaca_broker, "place_order", flaky_place_order)
+
+    payload = {"secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL"}
+    first = client.post("/webhook", json=payload)
+    assert first.status_code == 502
+
+    # The failed attempt rolled back its dedup stamp...
+    assert "AAPL_buy" not in state.last_signal_time
+
+    # ...so the retry places a real order instead of 'duplicate ignored'.
+    retry = client.post("/webhook", json=payload)
+    assert retry.status_code == 200
+    assert retry.get_json()["status"] == "order placed"
+    assert len(calls) == 2
+
+
+def test_webhook_rejected_sell_rolls_back_dedup_stamp(client):
+    """Same rollback guarantee on a pre-broker rejection path (here: sell
+    with no held position) -- not just on broker exceptions."""
+    import state
+
+    resp = client.post("/webhook", json={
+        "secret": "test-webhook-secret", "action": "sell", "symbol": "AAPL",
+    })
+    assert resp.status_code == 400
+    assert "AAPL_sell" not in state.last_signal_time
+
+
+def test_webhook_duplicate_successful_signal_rejected_and_logged(client, monkeypatch, caplog):
+    """A genuinely duplicate signal (first one succeeded) within 60s must
+    still be dropped -- and, new with the rollback fix, the drop must show
+    up in the logs instead of being silent."""
+    import server
+
+    calls = []
+
+    def counting_place_order(symbol, side, size, order_type="market"):
+        calls.append(symbol)
+        return {"id": "fake-order-id", "status": "filled"}
+
+    monkeypatch.setattr(server.alpaca_broker, "place_order", counting_place_order)
+
+    payload = {"secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL"}
+    first = client.post("/webhook", json=payload)
+    assert first.status_code == 200
+    assert first.get_json()["status"] == "order placed"
+
+    with caplog.at_level(logging.INFO):
+        dup = client.post("/webhook", json=payload)
+    assert dup.status_code == 200
+    assert dup.get_json() == {"status": "duplicate ignored"}
+    assert any("Dropped duplicate buy stock AAPL" in r.getMessage() for r in caplog.records)
+
+    # Only the first request ever reached the broker.
+    assert calls == ["AAPL"]
 
 
 def test_webhook_ip_allowlist_enforce_rejects_unlisted_ip(client, monkeypatch):

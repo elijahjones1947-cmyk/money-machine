@@ -860,14 +860,27 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
     signal_key = '{0}_{1}'.format(symbol, action)
     now = time.time()
     if not is_manual and not is_forced_close:
-        if signal_key in state.last_signal_time:
-            if now - state.last_signal_time[signal_key] < 60:
-                return jsonify({'status': 'duplicate ignored'}), 200
+        last = state.last_signal_time.get(signal_key)
+        if last is not None and now - last < 60:
+            logging.info(
+                'Dropped duplicate {} {} {}: identical signal {:.1f}s ago already executed '
+                'or is still executing (60s dedup window)'.format(action, asset_class, symbol, now - last)
+            )
+            return jsonify({'status': 'duplicate ignored'}), 200
+    # Stamped BEFORE execution, not after: gunicorn runs threads=8, and two
+    # near-simultaneous identical webhooks must not both pass the check
+    # above and both place an order. The flip side is that at this point
+    # the stamp only means "attempted", not "executed" -- so every failure
+    # path below has to roll it back (the finally clause at the bottom),
+    # or a TradingView retry of the same alert after a failed first
+    # attempt gets silently swallowed as a duplicate for the full 60s
+    # window with the signal never actually traded.
     state.last_signal_time[signal_key] = now
 
     if not is_manual and not is_forced_close:
         _sanity_check_signal(broker, symbol, asset_class, action)
 
+    order_placed = False
     try:
         account = broker.get_account_info()
         price = broker.get_price(symbol)
@@ -973,6 +986,7 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
                 pnl = round((price - entry_price) * size, 2) if action == 'sell' else round((entry_price - price) * size, 2)
 
         broker.place_order(symbol, action, size)
+        order_placed = True
         log_prefix = 'SAFETY-NET FORCED CLOSE: ' if is_forced_close else ''
         logging.info('{}{} {} {} of {} ({})'.format(log_prefix, action.upper(), size, asset_class, symbol, config.TRADING_MODE))
 
@@ -1032,6 +1046,22 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
         logging.error('Broker error on {} {} {}: {}'.format(action, asset_class, symbol, e))
         alerts.record_broker_error(detail=traceback.format_exc())
         return jsonify({'error': str(e)}), 502
+    finally:
+        # The dedup stamp above is only allowed to mean "this signal
+        # already executed" once the order actually reached the broker
+        # and place_order returned normally. On any other outcome --
+        # sizing rejection, no position to sell, risk manager rejection,
+        # any of the broker/market errors above -- remove OUR stamp so a
+        # genuine retry isn't silently dropped as a duplicate. Compare
+        # against our own timestamp first so a newer stamp written by
+        # another thread is never clobbered.
+        if not order_placed and state.last_signal_time.get(signal_key) == now:
+            state.last_signal_time.pop(signal_key, None)
+            logging.info(
+                'Cleared dedup stamp for {} {}: attempt did not execute, a retry within 60s will be accepted'.format(
+                    action, symbol
+                )
+            )
 
 
 
