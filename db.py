@@ -33,8 +33,20 @@ _pool = None
 
 
 def init_pool():
-    """Call once at app startup."""
+    """Call once at app startup.
+
+    Idempotent: if _pool is already set -- a real pool from an earlier
+    call, OR one injected directly onto db._pool before this ever runs
+    -- this is a no-op rather than reconnecting/overwriting it. That's
+    what lets tests set db._pool to a fake (mock cursor/connection, no
+    real Postgres involved) before server.py is imported: server.py's
+    own module-level db.init_pool() call then just sees a pool already
+    present and returns immediately, so importing/exercising the app in
+    tests never needs a reachable DATABASE_URL. See tests/conftest.py.
+    """
     global _pool
+    if _pool is not None:
+        return
     database_url = os.environ.get("DATABASE_URL")
     if not database_url:
         raise RuntimeError(
