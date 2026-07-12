@@ -28,6 +28,34 @@ app = Flask(__name__, static_folder=None)
 logging.basicConfig(level=logging.INFO)
 app.secret_key = config.FLASK_SECRET
 
+
+class DBLogHandler(logging.Handler):
+    """Writes every WARNING+ log record app-wide to the error_log table
+    (db.py) so discord_bot.py -- a separate process with no direct
+    access to this process's logs or in-memory state -- has something
+    to read when someone asks it about recent bugs/errors. See
+    discord_bot.py's module docstring for the full read-only boundary.
+
+    A DB write failure here (pool not initialized yet at very early
+    startup, a transient connection error, etc.) must never crash the
+    app or recurse back into logging -- caught and dropped silently,
+    the exact same best-effort shape as every other DB write in this
+    codebase (load_persisted_state, _process_trade_signal's
+    db.save_trade call, ...).
+    """
+
+    def emit(self, record):
+        try:
+            message = record.getMessage()
+            if record.exc_info:
+                message += "\n" + "".join(traceback.format_exception(*record.exc_info))
+            db.save_error_log(level=record.levelname, source=record.name, message=message[:4000])
+        except Exception:
+            pass
+
+
+logging.getLogger().addHandler(DBLogHandler(level=logging.WARNING))
+
 WEBHOOK_SECRET = config.WEBHOOK_SECRET
 DASHBOARD_PASSWORD = config.DASHBOARD_PASSWORD
 
@@ -222,6 +250,36 @@ def run_position_safety_checks():
                 alerts.record_broker_error(detail=traceback.format_exc())
 
 
+def _persist_health_snapshot():
+    """Best-effort snapshot of risk_manager's halt state + auth-failure
+    counts + webhook timing into the bot_settings table (db.py) --
+    same key-value store everything else in Settings already uses, just
+    a new key. This is how discord_bot.py (a SEPARATE process, started
+    from the Procfile's "worker" entry) reads this data: it has no
+    direct access to THIS process's in-memory risk_manager/state.py
+    objects, so Postgres is the handoff point. Refreshed every
+    run_alert_checks cycle (5 min) -- a reader should treat this as
+    accurate as of 'updated_at', not real-time.
+
+    'last_webhook_at' mirrors state.last_webhook_at exactly, which is
+    set for EVERY inbound /webhook call regardless of whether it passes
+    the secret check (see webhook() below) -- not just authenticated
+    ones. discord_bot.py should describe it that way rather than as
+    "last successful hit".
+    """
+    try:
+        db.save_setting("health_snapshot", {
+            "account_halted": risk_manager.account_halted,
+            "trading_halted": dict(risk_manager.trading_halted),
+            "failed_login_attempts": len(state.failed_login_attempts),
+            "failed_webhook_attempts": len(state.failed_webhook_attempts),
+            "last_webhook_at": state.last_webhook_at,
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        logging.warning("Could not persist health snapshot to DB: {}".format(e))
+
+
 def run_alert_checks():
     """Posts to Discord (via alerts.py) for any of three conditions that
     just tripped: the account or an asset class getting halted by the
@@ -229,6 +287,9 @@ def run_alert_checks():
     broker errors piling up. See alerts.py's module docstring for the
     edge-triggered/latched alerting model and config.DISCORD_ALERT_WEBHOOK_URL
     for how this is fully disabled when unconfigured.
+
+    Also persists a health snapshot for discord_bot.py on the same
+    5-minute cycle -- see _persist_health_snapshot().
 
     Runs independently of trading itself, same as run_regime_checks and
     run_position_safety_checks -- a failure in one check (or in Discord
@@ -246,6 +307,7 @@ def run_alert_checks():
         alerts.check_and_alert_broker_errors()
     except Exception as e:
         logging.warning("Alert check (broker errors) failed: {}".format(e))
+    _persist_health_snapshot()
 
 
 scheduler = BackgroundScheduler(daemon=True)

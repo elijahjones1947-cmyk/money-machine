@@ -121,11 +121,27 @@ def init_schema():
                     volatility NUMERIC
                 );
             """)
+            # Written by server.py's DBLogHandler (every WARNING+ log
+            # record app-wide) and read by discord_bot.py -- a separate
+            # process with no direct access to this process's in-memory
+            # logs, so Postgres is the handoff point. See both files.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS error_log (
+                    id SERIAL PRIMARY KEY,
+                    occurred_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    level TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    message TEXT NOT NULL
+                );
+            """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_trades_executed_at ON trades (executed_at DESC);
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_regime_symbol_time ON market_regime (symbol, recorded_at DESC);
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_error_log_occurred_at ON error_log (occurred_at DESC);
             """)
 
 
@@ -241,3 +257,29 @@ def get_latest_regime(symbol):
                 (symbol,),
             )
             return cur.fetchone()
+
+
+# --- Error log (server.py's DBLogHandler writes; discord_bot.py reads) ----
+
+def save_error_log(level, source, message):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO error_log (level, source, message) VALUES (%s, %s, %s);",
+                (level, source, message),
+            )
+
+
+def get_recent_errors(limit=50):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT occurred_at, level, source, message
+                FROM error_log
+                ORDER BY occurred_at DESC
+                LIMIT %s;
+                """,
+                (limit,),
+            )
+            return cur.fetchall()

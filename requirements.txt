@@ -6,3 +6,4 @@ apscheduler
 gunicorn
 anthropic
 python-dotenv
+discord.py

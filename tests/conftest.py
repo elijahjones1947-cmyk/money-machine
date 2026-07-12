@@ -125,6 +125,17 @@ def _dispatch(store, sql_upper, params, as_dict):
         row = store["regimes"].get(symbol)
         return [] if row is None else [dict(row)]
 
+    if sql_upper.startswith("INSERT INTO ERROR_LOG"):
+        level, source, message = params
+        store["errors"].insert(0, {
+            "occurred_at": datetime.now(timezone.utc), "level": level,
+            "source": source, "message": message,
+        })
+        return []
+
+    if sql_upper.startswith("SELECT OCCURRED_AT, LEVEL, SOURCE, MESSAGE"):
+        return [dict(r) for r in store["errors"][:params[0]]]
+
     raise AssertionError("Fake DB got an unrecognized query: {!r}".format(sql_upper))
 
 
@@ -186,7 +197,7 @@ class _FakePool:
 # Shared in-memory "database" for the whole test session. Cleared before
 # each route test by reset_state() below. Exposed to tests via the
 # db_store fixture for seeding/asserting on persisted data directly.
-_DB_STORE = {"trades": [], "equity_history": [], "settings": {}, "regimes": {}}
+_DB_STORE = {"trades": [], "equity_history": [], "settings": {}, "regimes": {}, "errors": []}
 
 # Injected before server.py (or anything importing it) ever runs --
 # module-level, not inside a fixture, since a fixture only runs when a

@@ -59,6 +59,24 @@ DISCORD_ALERT_WEBHOOK_URL = optional_env("DISCORD_ALERT_WEBHOOK_URL")
 # drop it in a local .env for testing.
 GITHUB_DISPATCH_TOKEN = optional_env("GITHUB_DISPATCH_TOKEN")
 
+# Optional — auth token for discord_bot.py, a bug/error/health Q&A bot
+# that runs as its OWN process (see Procfile's "worker" entry), fully
+# separate from this Flask app and from Hermes. Left optional here
+# (not require_env) so importing config.py from THIS process (server.py)
+# never fails just because the Discord bot's process hasn't been
+# configured yet — discord_bot.py itself refuses to start without it
+# (see its main()), same "the feature that needs it fails loudly, not
+# the whole app" shape as ANTHROPIC_API_KEY/Hermes above. Get one from
+# https://discord.com/developers/applications (Bot tab, Reset Token),
+# set it as a Railway env var in production, or drop it in a local
+# .env for testing — NEVER commit it. See .gitignore.
+DISCORD_BOT_TOKEN = optional_env("DISCORD_BOT_TOKEN")
+
+# Optional — the single Discord channel ID discord_bot.py listens in;
+# messages in any other channel are ignored. Enable Developer Mode in
+# Discord's settings, then right-click the channel > Copy Channel ID.
+DISCORD_ALERTS_CHANNEL_ID = optional_env("DISCORD_ALERTS_CHANNEL_ID")
+
 BROKER_CONFIG = {
     "alpaca": {
         "paper": {
