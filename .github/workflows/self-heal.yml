@@ -21,8 +21,10 @@ name: Self-Heal on Critical Alert
 #   1. Install the Claude GitHub App on this repo: https://github.com/apps/claude
 #      (grants the scoped token this workflow uses to push branches and
 #      open PRs -- without it, git push/gh pr create below will fail).
-#   2. Add repo secret ANTHROPIC_API_KEY
-#      (Settings > Secrets and variables > Actions > New repository secret).
+#   2. Add repo secret CLAUDE_CODE_OAUTH_TOKEN (Settings > Secrets and
+#      variables > Actions > New repository secret) -- generate with
+#      `claude setup-token` locally (Pro/Max account). Uses OAuth token
+#      usage rather than pay-per-use ANTHROPIC_API_KEY credits.
 #   3. Add repo secret DISCORD_ALERT_WEBHOOK_URL -- same value as the
 #      Railway env var of the same name. GitHub Actions cannot read
 #      Railway's environment, so it needs to be stored here separately.
@@ -80,12 +82,18 @@ jobs:
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Uses the Claude Code OAuth token (Pro/Max subscription usage),
+          # not a pay-per-use API key -- switched from anthropic_api_key
+          # after the 2026-07-12 dry run failed with a billing_error /
+          # "Credit balance is too low" on that key's Anthropic Console
+          # account. Generate with `claude setup-token` locally; see
+          # docs/setup.md in anthropics/claude-code-action.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           base_branch: main
-          # TEMPORARY, for debugging the 2026-07-12 dry-run failure (instant
-          # is_error:true, 0 turns of real work, total_cost_usd:0 -- points at
-          # a claude_args parse failure, but the action hides stderr by
-          # default). Remove once the underlying cause is fixed and confirmed.
+          # TEMPORARY, left on from the same debugging session: the action
+          # hides Claude's stderr by default, and this is what surfaced the
+          # billing_error above. Remove once a dry run succeeds end-to-end
+          # with the OAuth token.
           show_full_output: true
           prompt: |
             A critical alert just fired in production for the "money-machine" automated
