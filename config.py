@@ -1,5 +1,14 @@
 import os
 
+from dotenv import load_dotenv
+
+# Loads a local .env file into os.environ, if one exists -- purely a
+# local-dev convenience (see .gitignore: .env is never committed, and
+# Railway sets real env vars directly, not via a file, so this is a
+# no-op there). load_dotenv() never overrides an env var that's already
+# set, so real environment config always wins over anything in .env.
+load_dotenv()
+
 
 def require_env(key):
     value = os.environ.get(key)
@@ -28,6 +37,27 @@ FLASK_SECRET = require_env("FLASK_SECRET")
 # set, rather than the app crashing at startup. Get one from
 # console.anthropic.com and set it as a Railway env var when ready.
 ANTHROPIC_API_KEY = optional_env("ANTHROPIC_API_KEY")
+
+# Optional — Discord alerting (bot halted, webhook silence, repeated
+# broker errors; see alerts.py) is fully disabled if this isn't set,
+# same pattern as ANTHROPIC_API_KEY above. Get one from a Discord
+# channel's Settings > Integrations > Webhooks, set it as a Railway env
+# var in production, or drop it in a local .env for testing — NEVER
+# commit it (this repo is public; anyone with the URL can post to the
+# channel). See .gitignore.
+DISCORD_ALERT_WEBHOOK_URL = optional_env("DISCORD_ALERT_WEBHOOK_URL")
+
+# Optional — lets alerts.py fire a repository_dispatch event (see
+# .github/workflows/self-heal.yml) alongside a Discord alert, so Claude
+# Code can automatically diagnose a critical event and draft a PR if
+# it's a real bug. Fully disabled (no dispatch call at all) if this
+# isn't set. A classic GitHub PAT with the `repo` scope (needed for the
+# POST /repos/{owner}/{repo}/dispatches endpoint), or a fine-grained PAT
+# with "Contents: Read and write" on this repo. Same rule as the Discord
+# URL above: NEVER commit it — this token can push branches and open
+# PRs on a public repo. Set it as a Railway env var in production, or
+# drop it in a local .env for testing.
+GITHUB_DISPATCH_TOKEN = optional_env("GITHUB_DISPATCH_TOKEN")
 
 BROKER_CONFIG = {
     "alpaca": {

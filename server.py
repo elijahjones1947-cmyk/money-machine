@@ -1,10 +1,11 @@
 from flask import Flask, request, jsonify, session, send_from_directory
-import logging, time, datetime, math, copy, hmac
+import logging, time, datetime, math, copy, hmac, traceback
 
 import config
 import state
 import db
 import regime
+import alerts
 from apscheduler.schedulers.background import BackgroundScheduler
 from errors import InsufficientFundsError, MarketClosedError, InvalidSymbolError, BrokerConnectionError
 from brokers.alpaca_broker import AlpacaBroker
@@ -163,6 +164,8 @@ def run_regime_checks():
                 logging.info("Regime check {}: {}".format(symbol, result))
             except Exception as e:
                 logging.warning("Regime check failed for {}: {}".format(symbol, e))
+                if isinstance(e, BrokerConnectionError):
+                    alerts.record_broker_error(detail=traceback.format_exc())
 
 
 def run_position_safety_checks():
@@ -215,6 +218,34 @@ def run_position_safety_checks():
                 logging.error("Safety-net force-close for {} did not succeed (status {})".format(p["symbol"], result[1]))
         except Exception as e:
             logging.error("Safety-net force-close FAILED for {}: {}".format(p["symbol"], e))
+            if isinstance(e, BrokerConnectionError):
+                alerts.record_broker_error(detail=traceback.format_exc())
+
+
+def run_alert_checks():
+    """Posts to Discord (via alerts.py) for any of three conditions that
+    just tripped: the account or an asset class getting halted by the
+    risk manager, /webhook going quiet too long during market hours, and
+    broker errors piling up. See alerts.py's module docstring for the
+    edge-triggered/latched alerting model and config.DISCORD_ALERT_WEBHOOK_URL
+    for how this is fully disabled when unconfigured.
+
+    Runs independently of trading itself, same as run_regime_checks and
+    run_position_safety_checks -- a failure in one check (or in Discord
+    itself) should never affect order placement or block the others.
+    """
+    try:
+        alerts.check_and_alert_bot_halted(risk_manager)
+    except Exception as e:
+        logging.warning("Alert check (bot halted) failed: {}".format(e))
+    try:
+        alerts.check_and_alert_webhook_silence()
+    except Exception as e:
+        logging.warning("Alert check (webhook silence) failed: {}".format(e))
+    try:
+        alerts.check_and_alert_broker_errors()
+    except Exception as e:
+        logging.warning("Alert check (broker errors) failed: {}".format(e))
 
 
 scheduler = BackgroundScheduler(daemon=True)
@@ -234,6 +265,13 @@ scheduler.add_job(run_regime_checks, "interval", minutes=15, next_run_time=datet
 # next_run_time=None caused the regime bug above: never leave a safety
 # job in APScheduler's paused-by-default state.
 scheduler.add_job(run_position_safety_checks, "interval", minutes=5, next_run_time=datetime.datetime.now())
+# Same cadence as the safety-net check above -- 5 minutes is frequent
+# enough to catch a fresh halt or an error spike quickly without being
+# noisy, and matches the 15-minute broker-error window/2-hour webhook-
+# silence threshold in alerts.py closely enough that a condition won't
+# sit undetected for long. Immediate first run for the same
+# don't-leave-a-job-paused reason as the two jobs above.
+scheduler.add_job(run_alert_checks, "interval", minutes=5, next_run_time=datetime.datetime.now())
 scheduler.start()
 # --- end market regime classifier scheduler ------------------------------
 
@@ -368,7 +406,7 @@ def get_all_positions():
                 'unrealized_pl': float(p.unrealized_pl),
             })
     except BrokerConnectionError:
-        pass
+        alerts.record_broker_error(detail=traceback.format_exc())
 
     try:
         for p in oanda_broker.get_positions():
@@ -387,7 +425,7 @@ def get_all_positions():
                 'unrealized_pl': unrealized,
             })
     except BrokerConnectionError:
-        pass
+        alerts.record_broker_error(detail=traceback.format_exc())
 
     return positions
 
@@ -409,6 +447,7 @@ def get_combined_equity():
             got_any = True
         except BrokerConnectionError as e:
             logging.warning("Could not fetch equity from a broker: {}".format(e))
+            alerts.record_broker_error(detail=traceback.format_exc())
     if not got_any:
         raise BrokerConnectionError("Could not reach either broker to compute combined equity")
     return total
@@ -651,6 +690,14 @@ def add_watchlist():
 def webhook():
     """External-facing route for TradingView alerts — requires the shared
     WEBHOOK_SECRET, never exposed to the browser."""
+    # Recorded for EVERY inbound call, before the secret check below --
+    # the webhook-silence alert (alerts.py) is about whether anything is
+    # reaching this endpoint at all, not just well-authenticated hits.
+    # Also clears the silence latch, so a later separate silent stretch
+    # can alert again instead of staying silenced forever after the first.
+    state.last_webhook_at = time.time()
+    state.alerted_webhook_silence = False
+
     data = request.json
 
     # Log every inbound webhook call regardless of outcome (secret
@@ -921,6 +968,7 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
         return jsonify({'error': str(e)}), 400
     except BrokerConnectionError as e:
         logging.error('Broker error on {} {} {}: {}'.format(action, asset_class, symbol, e))
+        alerts.record_broker_error(detail=traceback.format_exc())
         return jsonify({'error': str(e)}), 502
 
 

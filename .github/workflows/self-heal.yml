@@ -1,0 +1,235 @@
+name: Self-Heal on Critical Alert
+
+# Triggered by alerts.py's repository_dispatch call (fired from
+# server.py's scheduled run_alert_checks job -- see alerts.py's
+# _trigger_github_dispatch) whenever one of three critical conditions
+# first trips: the account or an asset class getting halted by the risk
+# manager, /webhook going quiet during market hours, or broker errors
+# piling up.
+#
+# Runs Claude Code non-interactively to read the relevant code, decide
+# whether this is a genuine code bug versus the risk/safety system
+# correctly doing its job (or an external issue), and -- ONLY if it's
+# confident it found and fixed a real bug, with the existing pytest
+# suite passing -- opens a PR against main for a human to review.
+#
+# This workflow NEVER merges or deploys anything itself. The only two
+# outcomes are "no PR opened" or "one open PR", either way followed by
+# a Discord notification summarizing the conclusion.
+#
+# --- One-time manual setup (cannot be done from code) ---------------
+#   1. Install the Claude GitHub App on this repo: https://github.com/apps/claude
+#      (grants the scoped token this workflow uses to push branches and
+#      open PRs -- without it, git push/gh pr create below will fail).
+#   2. Add repo secret ANTHROPIC_API_KEY
+#      (Settings > Secrets and variables > Actions > New repository secret).
+#   3. Add repo secret DISCORD_ALERT_WEBHOOK_URL -- same value as the
+#      Railway env var of the same name. GitHub Actions cannot read
+#      Railway's environment, so it needs to be stored here separately.
+#   4. Set GITHUB_DISPATCH_TOKEN as a Railway env var (and/or a local
+#      .env for testing) for the app itself -- a classic PAT with the
+#      `repo` scope, or a fine-grained PAT with "Contents: Read and
+#      write" on this repo. That's what alerts.py uses to fire the
+#      repository_dispatch event that triggers this workflow; without
+#      it, alerts.py's dispatch call is a silent no-op (see config.py's
+#      GITHUB_DISPATCH_TOKEN).
+
+on:
+  repository_dispatch:
+    types: [bot-halted, webhook-silence, broker-errors]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  diagnose-and-fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup git identity
+        run: |
+          git config --global user.email "claude[bot]@users.noreply.github.com"
+          git config --global user.name "claude[bot]"
+
+      - name: Compute fix branch name
+        id: branch
+        env:
+          ALERT_TYPE: ${{ github.event.action }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          SAFE_TYPE=$(printf '%s' "$ALERT_TYPE" | tr -cd 'a-zA-Z0-9-')
+          echo "name=auto-fix/${SAFE_TYPE}-${RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Create fix branch
+        run: git checkout -b "${{ steps.branch.outputs.name }}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Diagnose and, if warranted, fix with Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          base_branch: main
+          prompt: |
+            A critical alert just fired in production for the "money-machine" automated
+            trading bot (Flask backend + APScheduler background jobs; see CLAUDE.md at the
+            repo root for the full architecture before you start).
+
+            Alert type: ${{ github.event.action }}
+            Repository: ${{ github.repository }}
+            Fix branch (already checked out -- do not create or switch to a different one):
+            ${{ steps.branch.outputs.name }}
+
+            Alert context (client_payload from the dispatch that triggered this run):
+            ${{ toJSON(github.event.client_payload) }}
+
+            WHAT EACH ALERT TYPE MEANS -- read the section matching the alert type above,
+            the other two don't apply to this run:
+
+            - bot-halted: the risk manager (risk/risk_manager.py) tripped a halt, either
+              account-wide (risk_manager.account_halted) or for one asset class
+              (risk_manager.trading_halted[asset_class]) -- client_payload.scope tells you
+              which. THIS IS EXPECTED, CORRECT BEHAVIOR when a real daily loss cap is
+              legitimately hit -- that's the risk system doing exactly its job, NOT a bug.
+              Only treat it as a bug if you find something like: the halt math itself is
+              wrong (state.risk_caps, daily_pnl accounting in risk/risk_manager.py or
+              record_trade_result), the halt isn't clearing on the next day's rollover
+              (server.py's check_daily_rollover/reset_daily), or the reduces_position bypass
+              that's supposed to let existing positions still be closed during a halt (see
+              risk/risk_manager.py's check_trade docstring) is broken. Read
+              risk/risk_manager.py, server.py (check_daily_rollover, record_trade_result
+              usage, run_position_safety_checks), and state.py (risk_caps) before concluding
+              either way.
+
+            - webhook-silence: no request has reached the /webhook route in over the
+              configured threshold during US stock market hours (see alerts.py). Since
+              server.py sets state.last_webhook_at as the very first line of webhook(),
+              before any request parsing, this means requests aren't reaching the process at
+              all -- usually a TradingView-side or network/infra issue with NOTHING to fix in
+              this repository. Only treat this as a real bug if you find an actual code-level
+              cause inside this repo, e.g. a routing conflict (server.py has a documented
+              history of exactly this kind of bug -- read the comment above
+              `app = Flask(__name__, static_folder=None)` near the top of the file) or the
+              process crashing on startup. If you can't find a concrete code-level cause,
+              conclude this is NOT a bug in this repository.
+
+            - broker-errors: client_payload.error_count broker errors were recorded within
+              client_payload.window_minutes minutes (see alerts.record_broker_error(), called
+              from server.py wherever a BrokerConnectionError is caught). client_payload.traceback
+              is the most recent one -- read that first. Most broker errors are genuine
+              Alpaca/OANDA outages or rate-limiting with nothing to fix here, but check
+              brokers/alpaca_broker.py, brokers/oanda_broker.py, and errors.py's
+              _translate_error for an actual parsing/request bug if the traceback points at a
+              specific line in this repo rather than a raw network/HTTP failure.
+
+            YOUR TASK:
+            1. Read whatever code the matching section above points you to.
+            2. Decide: is this a genuine, fixable code bug in this repository, or is it the
+               risk/safety system correctly doing its job / an external issue with nothing to
+               fix here? When genuinely uncertain, conclude it is NOT a bug -- a missed real
+               bug is far cheaper than a wrong "fix" landing in a live trading bot.
+            3. If, and only if, you're confident it's a real bug: make the smallest possible
+               fix. Don't refactor, rename, or touch anything unrelated to that one bug. Then
+               run the existing test suite:
+               `pip install -r requirements.txt -r requirements-dev.txt && pytest`.
+               If tests fail after your change, do NOT commit/push/open a PR -- treat this the
+               same as "couldn't safely fix it" in your conclusion below.
+               If tests pass: commit (with a clear message explaining the bug and the fix),
+               `git push -u origin ${{ steps.branch.outputs.name }}`, then
+               `gh pr create --base main --title "..." --body "..."` describing the alert that
+               triggered this run, what you found, and what the fix does. Record the PR URL
+               it prints.
+            4. If it's not a bug, or you couldn't safely fix it: make NO commits, NO push, and
+               open NO PR. The unpushed local branch is simply discarded when this job ends --
+               that's fine, it's meant to be.
+
+            HARD RULES, NO EXCEPTIONS:
+            - NEVER merge any PR, NEVER push directly to `main`, NEVER run any deploy/release
+              command. Your only allowed outcomes are "no PR" or "one open PR against main for
+              a human to review" -- nothing you do here ever reaches production on its own.
+            - NEVER touch .env, NEVER touch git config beyond the identity already set for you,
+              NEVER modify GitHub Actions workflow files (including this one), and NEVER touch
+              any secret or credential material.
+            - Keep the diff minimal and scoped to exactly the one bug you identified.
+
+            Finish by reporting your conclusion in the required structured format.
+          claude_args: |
+            --max-turns 30
+            --allowedTools "Read,Grep,Glob,Edit,MultiEdit,Write,Bash(git:*),Bash(gh:*),Bash(python:*),Bash(pip:*),Bash(pytest:*)"
+            --system-prompt "You are diagnosing a production alert from an automated trading bot. Default to caution: an incorrect automated fix landing in live trading code is far more costly than concluding nothing needs fixing. Never merge, deploy, or push directly to main."
+            --json-schema '{"type":"object","properties":{"is_bug":{"type":"boolean","description":"true only if you found, fixed, tested (pytest passing), and opened a PR for a genuine code bug; false if this reflects the risk/safety system working correctly, an external issue, or you could not safely/confidently fix it"},"summary":{"type":"string","description":"2-4 sentences: your conclusion and reasoning, and if is_bug is true, what the fix does"},"pr_url":{"type":"string","description":"URL of the PR you opened, or an empty string if none"},"branch_name":{"type":"string","description":"Branch you pushed, or an empty string if none"}},"required":["is_bug","summary","pr_url","branch_name"]}'
+
+      # Runs regardless of whether the Claude step above succeeded, failed, or
+      # timed out (if: always()) -- a diagnosis run that errors out is exactly
+      # the kind of thing that needs to be visible, not silently dropped.
+      #
+      # Two outputs, both built from the same structured_output, deterministically
+      # (not left to Claude to remember to do) so they can't drift or get skipped:
+      #   - $GITHUB_STEP_SUMMARY: always written. This is what satisfies "post
+      #     that conclusion as a workflow summary instead of opening a PR" for
+      #     the no-bug case -- and for every other outcome too, so there's
+      #     always a human-readable record on the workflow run page itself.
+      #   - Discord: same conclusion, posted to DISCORD_ALERT_WEBHOOK_URL so it
+      #     shows up next to the original alert without anyone having to go
+      #     looking for this run.
+      - name: Report results (workflow summary + Discord)
+        if: always()
+        env:
+          DISCORD_ALERT_WEBHOOK_URL: ${{ secrets.DISCORD_ALERT_WEBHOOK_URL }}
+          ALERT_TYPE: ${{ github.event.action }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          if [ -z "$STRUCTURED_OUTPUT" ] || ! echo "$STRUCTURED_OUTPUT" | jq -e . >/dev/null 2>&1; then
+            TITLE="Self-heal workflow for $ALERT_TYPE did not complete"
+            DESC="Claude Code did not return a result -- the run may have errored or hit its turn limit. Check the workflow run for details."
+            COLOR=15105570
+          else
+            IS_BUG=$(echo "$STRUCTURED_OUTPUT" | jq -r '.is_bug')
+            SUMMARY=$(echo "$STRUCTURED_OUTPUT" | jq -r '.summary')
+            PR_URL=$(echo "$STRUCTURED_OUTPUT" | jq -r '.pr_url')
+
+            if [ "$IS_BUG" = "true" ] && [ -n "$PR_URL" ] && [ "$PR_URL" != "null" ]; then
+              TITLE="🔧 Self-heal: PR opened for $ALERT_TYPE"
+              DESC="$SUMMARY"$'\n\n'"PR: $PR_URL"
+              COLOR=3066993
+            elif [ "$IS_BUG" = "true" ]; then
+              TITLE="⚠️ Self-heal: bug suspected but no PR opened for $ALERT_TYPE"
+              DESC="$SUMMARY"
+              COLOR=15105570
+            else
+              TITLE="✅ Self-heal: no bug found for $ALERT_TYPE"
+              DESC="$SUMMARY"
+              COLOR=3447003
+            fi
+          fi
+
+          {
+            echo "## $TITLE"
+            echo ""
+            echo "$DESC"
+            echo ""
+            echo "_Alert type: \`$ALERT_TYPE\` — [workflow run]($RUN_URL)_"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$DISCORD_ALERT_WEBHOOK_URL" ]; then
+            echo "DISCORD_ALERT_WEBHOOK_URL secret not set -- skipping Discord notification."
+            exit 0
+          fi
+
+          PAYLOAD=$(jq -n --arg title "$TITLE" --arg desc "$DESC" --argjson color "$COLOR" --arg run_url "$RUN_URL" \
+            '{embeds: [{title: $title, description: $desc, color: $color, url: $run_url}]}')
+
+          curl -sf -X POST -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_ALERT_WEBHOOK_URL"

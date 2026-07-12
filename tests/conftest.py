@@ -54,6 +54,19 @@ os.environ["ALPACA_PAPER_KEY"] = "test-alpaca-key"
 os.environ["ALPACA_PAPER_SECRET"] = "test-alpaca-secret"
 os.environ["OANDA_PRACTICE_KEY"] = "test-oanda-key"
 os.environ["OANDA_PRACTICE_ACCOUNT_ID"] = "test-oanda-account"
+# Forced empty, NOT just left unset: config.py calls load_dotenv() at
+# import time, and a real local .env (gitignored, used for manually
+# testing Discord alerting -- see alerts.py) may set a real, live
+# webhook URL. load_dotenv() never overrides an already-set env var, so
+# setting this here BEFORE config.py is ever imported guarantees tests
+# never post a real message to Discord, no matter what's in .env.
+os.environ["DISCORD_ALERT_WEBHOOK_URL"] = ""
+# Same reasoning, same guarantee: a real local .env could have a real
+# GITHUB_DISPATCH_TOKEN in it (see alerts.py/self-heal.yml) -- forcing
+# this empty means tests can never fire a real repository_dispatch
+# event (which would trigger a real Claude Code run and, in the worst
+# case, a real PR against a real GitHub repo).
+os.environ["GITHUB_DISPATCH_TOKEN"] = ""
 
 
 # --- Fake Postgres: a fake cursor/connection/pool stack that db.py's

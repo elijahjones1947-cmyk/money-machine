@@ -44,3 +44,28 @@ current_day = None  # used to detect day rollover and reset daily counters
 # single-user bot. See server.py's _record_failed_attempt.
 failed_login_attempts = []
 failed_webhook_attempts = []
+
+# Discord alerting (see alerts.py). last_webhook_at is set on every
+# /webhook hit (regardless of whether it passes auth -- see server.py's
+# webhook() route) so the webhook-silence check can tell "TradingView
+# stopped reaching us" apart from "TradingView's been quiet because
+# there's nothing to signal on right now". broker_error_timestamps is a
+# rolling log of recent broker errors, same pattern as
+# failed_login_attempts/failed_webhook_attempts above.
+# last_broker_error_detail holds the most recent one's traceback text
+# (see server.py's alerts.record_broker_error(detail=...) call sites),
+# forwarded as context in the repository_dispatch payload that triggers
+# the self-heal GitHub Actions workflow.
+last_webhook_at = None
+broker_error_timestamps = []
+last_broker_error_detail = None
+
+# One-shot latches so the scheduled alert check (server.py's
+# run_alert_checks, every 5 min) doesn't re-send the same Discord alert
+# every cycle a condition stays true -- each flips back to False the
+# moment its condition clears, so the NEXT occurrence alerts again. See
+# alerts.py's check_and_alert_* functions.
+alerted_account_halted = False
+alerted_trading_halted = {"stock": False, "forex": False, "crypto": False}
+alerted_webhook_silence = False
+alerted_broker_errors = False
