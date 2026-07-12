@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from brokers.base import BrokerInterface
 from errors import (
@@ -56,6 +58,34 @@ class OandaBroker(BrokerInterface):
             "Authorization": "Bearer {}".format(api_key),
             "Content-Type": "application/json",
         })
+
+        # This session is constructed once at app startup and reused for
+        # the life of the (single, per the Procfile) gunicorn worker --
+        # observed in production as intermittent "Read timed out" errors
+        # on otherwise-healthy requests (confirmed OANDA's API itself
+        # responds in well under a second; only calls through this
+        # long-lived session were affected). The classic cause: a pooled
+        # keep-alive connection gets silently dropped by the network
+        # path without a clean close, and the next request to reuse it
+        # hangs until the read timeout fires. urllib3 discards a
+        # connection that errors rather than returning it to the pool,
+        # so a single retry gets a fresh connection and succeeds.
+        #
+        # total=1 (one retry, two attempts max) keeps the worst case
+        # (10s timeout + ~0.3s backoff + 10s timeout ≈ 20.3s) safely
+        # under the Procfile's 30s gunicorn worker timeout. Retry's
+        # default allowed_methods excludes POST -- place_order is never
+        # auto-retried, so a request that actually reached OANDA but
+        # timed out waiting for the response can't result in a
+        # duplicate order. PUT (cancel_order) and GET (everything else)
+        # are safe to retry since they're idempotent. status_forcelist
+        # is left unset (no retries on HTTP error status codes), so
+        # _translate_error's handling of OANDA's own error responses is
+        # untouched -- only connection/read timeouts trigger a retry.
+        retry = Retry(total=1, connect=1, read=1, backoff_factor=0.3)
+        adapter = HTTPAdapter(max_retries=retry)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
 
     def get_price(self, symbol):
         url = "{}/v3/accounts/{}/pricing".format(self.base_url, self.account_id)

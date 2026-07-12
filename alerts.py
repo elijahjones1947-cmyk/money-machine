@@ -58,8 +58,27 @@ GITHUB_REPO = "elijahjones1947-cmyk/money-machine"
 GITHUB_DISPATCH_URL = "https://api.github.com/repos/{}/dispatches".format(GITHUB_REPO)
 
 WEBHOOK_SILENCE_THRESHOLD_SECONDS = 2 * 60 * 60  # 2 hours
-BROKER_ERROR_WINDOW_SECONDS = 15 * 60  # 15 minutes
-BROKER_ERROR_THRESHOLD = 5  # >= this many broker errors within the window above triggers an alert
+
+# A real incident (2026-07-12, see git log around this comment) showed why
+# these two numbers can't just be "reasonable-sounding round numbers" in
+# isolation: they were 15 min / 5, matching server.py's run_regime_checks
+# interval (also 15 min) exactly. run_regime_checks can contribute at most
+# one broker error per watched symbol per run, so a single symbol stuck
+# failing every cycle (which is exactly what happened -- persistent OANDA
+# timeouts on EUR_USD) could never accumulate more than ~1-2 errors within
+# any 15-minute window, no matter how many hours it kept failing. The
+# threshold was structurally unreachable for exactly the failure pattern
+# most likely to occur in practice.
+#
+# 45 minutes / 3 fixes that: three consecutive 15-minute regime-check
+# failures for even just ONE symbol land inside a single 45-minute window
+# and trip the alert, while one or two isolated blips (increasingly rare
+# now that brokers/oanda_broker.py retries connection/read timeouts once
+# before giving up -- see its docstring) still don't. Any other error
+# source (run_position_safety_checks every 5 min, live webhook/dashboard
+# traffic) only makes a real outage cross this threshold faster.
+BROKER_ERROR_WINDOW_SECONDS = 45 * 60  # 45 minutes
+BROKER_ERROR_THRESHOLD = 3  # >= this many broker errors within the window above triggers an alert
 
 
 def _post_to_discord(title, description):
