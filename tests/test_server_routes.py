@@ -19,6 +19,7 @@ grows further.
 
 import json
 import logging
+from types import SimpleNamespace
 
 import config
 from errors import BrokerConnectionError
@@ -246,6 +247,84 @@ def test_dashboard_returns_combined_equity_and_positions(auth_client):
 def test_dashboard_requires_auth(client):
     resp = client.get("/api/dashboard")
     assert resp.status_code == 401
+
+
+def test_get_all_positions_classifies_alpaca_crypto_by_asset_class_field(app_module, reset_state, monkeypatch):
+    """Alpaca's list_positions() returns crypto symbols WITHOUT the pair
+    separator ('BTCUSD'), which the slash heuristic in
+    asset_class_for_symbol misreads as a stock ticker -- that exact
+    misclassification sent the 5-min safety net's force-close down the
+    stock order path, where Alpaca rejected it forever. The API's own
+    asset_class field is authoritative, and the symbol comes back
+    normalized to the slash format everything downstream speaks."""
+    import server
+
+    fake_positions = [
+        SimpleNamespace(
+            symbol="BTCUSD", asset_class="crypto", qty="0.235",
+            avg_entry_price="63840.10", current_price="61849.93", unrealized_pl="-467.75",
+        ),
+        SimpleNamespace(
+            symbol="AAPL", asset_class="us_equity", qty="31",
+            avg_entry_price="210.00", current_price="212.50", unrealized_pl="77.50",
+        ),
+    ]
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: fake_positions)
+
+    positions = {p["symbol"]: p for p in server.get_all_positions()}
+
+    assert positions["BTC/USD"]["asset_class"] == "crypto"
+    assert positions["BTC/USD"]["qty"] == 0.235
+    assert positions["AAPL"]["asset_class"] == "stock"
+    assert "BTCUSD" not in positions  # raw no-separator form never leaks downstream
+
+
+def test_normalize_alpaca_crypto_symbol(app_module):
+    import server
+
+    assert server._normalize_alpaca_crypto_symbol("BTCUSD") == "BTC/USD"
+    assert server._normalize_alpaca_crypto_symbol("ETHUSDT") == "ETH/USDT"  # longest-suffix wins, not ETHUS/DT
+    assert server._normalize_alpaca_crypto_symbol("BTC/USD") == "BTC/USD"  # already normalized
+    assert server._normalize_alpaca_crypto_symbol("AAPL") == "AAPL"  # unrecognized -- untouched
+
+
+def test_webhook_sell_crypto_matches_alpaca_no_separator_position(client, monkeypatch):
+    """A webhook sell for 'BTC/USD' must match the real position Alpaca
+    reports as 'BTCUSD' -- without normalization the held-qty gate saw
+    no position and wrongly rejected every crypto sell."""
+    import server
+
+    fake_position = SimpleNamespace(symbol="BTCUSD", asset_class="crypto", qty="0.235")
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    resp = client.post("/webhook", json={
+        "secret": "test-webhook-secret", "action": "sell", "symbol": "BTC/USD",
+    })
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "order placed"
+    assert body["qty"] == 0.235  # sized to the real held quantity
+
+
+def test_sanity_check_sell_branch_logs_warning_instead_of_throwing(app_module, reset_state, monkeypatch, caplog):
+    """The SELL branch's warning message had three {} placeholders but
+    only two .format() args, so it raised IndexError on every call --
+    swallowed by the catch-all and logged as 'Sanity check skipped'.
+    The sell-side sanity check had never actually produced its warning."""
+    import server
+
+    monkeypatch.setattr(
+        server.alpaca_broker, "get_ohlcv",
+        lambda symbol, timeframe="1h", limit=100: [{}] * 50,
+    )
+    monkeypatch.setattr(server, "compute_signals", lambda bars: [{"sell_signal": False, "ema_fast": 123.45}])
+
+    with caplog.at_level(logging.WARNING):
+        server._sanity_check_signal(server.alpaca_broker, "AAPL", "stock", "sell")
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("SANITY CHECK: webhook says SELL AAPL" in m for m in messages)
+    assert not any("Sanity check skipped" in m for m in messages)
 
 
 def test_backtest_response_includes_live_performance_key(auth_client):

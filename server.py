@@ -376,7 +376,13 @@ def _get_client_ip():
 def asset_class_for_symbol(symbol):
     """Crypto pairs use Alpaca's slash format, e.g. BTC/USD.
     Forex pairs use OANDA's underscore format, e.g. EUR_USD.
-    Anything else (AAPL, TSLA, ...) is treated as a stock/Alpaca symbol."""
+    Anything else (AAPL, TSLA, ...) is treated as a stock/Alpaca symbol.
+
+    ONLY safe for symbols in this app's own formats (webhook payloads,
+    watched_symbols, ...). Symbols coming back FROM Alpaca's API strip
+    the slash ('BTCUSD') and misclassify as stock here -- normalize with
+    _normalize_alpaca_crypto_symbol first, or better, trust the API
+    response's own asset_class field (see get_all_positions)."""
     if "/" in symbol:
         return "crypto"
     if "_" in symbol:
@@ -384,14 +390,42 @@ def asset_class_for_symbol(symbol):
     return "stock"
 
 
+# Quote currencies Alpaca supports for crypto pairs, longest first so
+# e.g. 'DOGEUSDT' splits as DOGE/USDT rather than mis-splitting on the
+# shorter 'USD' suffix match.
+_ALPACA_CRYPTO_QUOTES = ("USDT", "USDC", "USD", "BTC")
+
+
+def _normalize_alpaca_crypto_symbol(symbol):
+    """Alpaca API responses (positions, orders) return crypto symbols
+    WITHOUT the pair separator ('BTCUSD'), while everything in this app
+    -- and Alpaca's own order/market-data endpoints -- speaks the slash
+    format ('BTC/USD'). Reinserts the slash before the quote currency;
+    already-slashed or unrecognized symbols pass through unchanged."""
+    if "/" in symbol:
+        return symbol
+    for quote in _ALPACA_CRYPTO_QUOTES:
+        if symbol.endswith(quote) and len(symbol) > len(quote):
+            return symbol[: -len(quote)] + "/" + quote
+    return symbol
+
+
 def _get_held_qty(broker, symbol):
     """Current held quantity for `symbol` on an Alpaca-backed broker
     (stock/crypto), or 0.0 if the bot doesn't currently hold a position
     in it. Used to gate sells to what's actually held -- see
-    _process_trade_signal."""
+    _process_trade_signal.
+
+    `symbol` arrives in this app's slash format ('BTC/USD') while
+    Alpaca's positions come back without the separator ('BTCUSD') --
+    normalize before comparing, or a crypto sell never matches its own
+    real position and gets wrongly rejected with 'no position to sell'."""
     try:
         for p in broker.get_positions():
-            if p.symbol == symbol:
+            held_symbol = p.symbol
+            if getattr(p, 'asset_class', None) == 'crypto':
+                held_symbol = _normalize_alpaca_crypto_symbol(held_symbol)
+            if held_symbol == symbol:
                 return float(p.qty)
     except BrokerConnectionError as e:
         logging.warning("Could not check held position for {}: {}".format(symbol, e))
@@ -440,7 +474,9 @@ def _sanity_check_signal(broker, symbol, asset_class, action):
             logging.warning(
                 "SANITY CHECK: webhook says SELL {} but the Python strategy port doesn't currently see its "
                 "momentum-exit condition on the {} timeframe (ema_fast={}, close vs ema_fast trend flip check). "
-                "Not blocking the trade -- just flagging a possible signal/timeframe mismatch.".format(symbol, timeframe)
+                "Not blocking the trade -- just flagging a possible signal/timeframe mismatch.".format(
+                    symbol, timeframe, latest["ema_fast"]
+                )
             )
     except Exception as e:
         logging.warning("Sanity check skipped for {} {}: {}".format(action, symbol, e))
@@ -460,10 +496,29 @@ def get_all_positions():
     positions = []
     try:
         for p in alpaca_broker.get_positions():
-            ac = asset_class_for_symbol(p.symbol)
+            # Alpaca's own asset_class field ('us_equity'/'crypto') is
+            # authoritative -- position symbols come back WITHOUT the
+            # pair separator ('BTCUSD'), which asset_class_for_symbol's
+            # slash heuristic misreads as a stock ticker. That exact
+            # misclassification sent the safety-net monitor's force-close
+            # down the stock order path, where Alpaca rejected it ('no
+            # trade found for BTCUSD') every 5 minutes forever without
+            # the position ever closing. The symbol is normalized back
+            # to slash form too, so everything downstream (force-close
+            # orders, price lookups, the dashboard) gets the format the
+            # rest of the app -- and Alpaca's own order endpoint -- speaks.
+            symbol = p.symbol
+            raw_class = getattr(p, 'asset_class', None)
+            if raw_class == 'crypto':
+                ac = 'crypto'
+                symbol = _normalize_alpaca_crypto_symbol(symbol)
+            elif raw_class is not None:
+                ac = 'stock'
+            else:
+                ac = asset_class_for_symbol(symbol)  # very old API shape with no asset_class -- fall back to the heuristic
             qty = float(p.qty)
             positions.append({
-                'symbol': p.symbol, 'asset_class': ac, 'direction': 'long',
+                'symbol': symbol, 'asset_class': ac, 'direction': 'long',
                 'qty': qty, 'avg_entry': float(p.avg_entry_price),
                 'current_price': float(p.current_price),
                 'unrealized_pl': float(p.unrealized_pl),
