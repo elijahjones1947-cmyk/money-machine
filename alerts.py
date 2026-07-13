@@ -144,22 +144,43 @@ def record_broker_error(detail=None):
         state.broker_error_timestamps.pop(0)
 
 
-def _is_market_hours(now_utc=None):
-    """US stock market regular session (Mon-Fri, 9:30-16:00
-    America/New_York), DST-aware via zoneinfo. Deliberate simplification:
-    forex and crypto trade far more hours than this. It's used only to
-    gate the webhook-silence check so that check doesn't fire every
-    single weekend/overnight, when zero webhook hits is completely
-    normal rather than a sign anything's broken. A real forex/crypto-only
-    problem during stock off-hours won't be caught by this check --
-    flagging that gap rather than pretending this covers every asset
-    class's hours."""
+def _is_market_hours(asset_class, now_utc=None):
+    """Whether `asset_class`'s market is currently in session, DST-aware
+    via zoneinfo. Used only to gate the webhook-silence check so it
+    doesn't fire when zero webhook hits is completely normal (a closed
+    market) rather than a sign anything's broken. Per asset class
+    because a single NYSE-only gate here used to mean crypto (a 24/7
+    market) was NEVER checked at all and forex went unmonitored for a
+    ~16.5-hour stretch every week between its Sunday-evening open and
+    Monday's NYSE open:
+
+      - crypto: always in session, no gating -- the market never closes,
+        so silence is potentially meaningful at any hour of any day.
+      - forex: the real forex trading week, Sunday 17:00 ET through
+        Friday 17:00 ET, continuous through weeknights (forex trades
+        around the clock between those bounds).
+      - stock: NYSE regular session, Mon-Fri 9:30-16:00 ET.
+    """
+    if asset_class == "crypto":
+        return True
     if _NY_TZ is None:
         return True  # no tzdata available -- fail open rather than never alerting
     now_ny = (now_utc or datetime.now(timezone.utc)).astimezone(_NY_TZ)
-    if now_ny.weekday() >= 5:  # Saturday/Sunday
-        return False
+    weekday = now_ny.weekday()  # Mon=0 .. Sun=6
     minutes_since_midnight = now_ny.hour * 60 + now_ny.minute
+
+    if asset_class == "forex":
+        if weekday <= 3:  # Mon-Thu: open around the clock
+            return True
+        if weekday == 4:  # Friday: open until the 17:00 ET close
+            return minutes_since_midnight < 17 * 60
+        if weekday == 5:  # Saturday: closed all day
+            return False
+        return minutes_since_midnight >= 17 * 60  # Sunday: opens 17:00 ET
+
+    # stock: NYSE regular session
+    if weekday >= 5:  # Saturday/Sunday
+        return False
     return (9 * 60 + 30) <= minutes_since_midnight < (16 * 60)
 
 
@@ -202,30 +223,43 @@ def check_and_alert_bot_halted(risk_manager):
 
 
 def check_and_alert_webhook_silence():
-    if not _is_market_hours():
-        return
-    if state.last_webhook_at is None:
-        return  # no /webhook hit yet this run -- nothing to compare against
-    silent_for = time.time() - state.last_webhook_at
-    if silent_for < WEBHOOK_SILENCE_THRESHOLD_SECONDS:
-        return
-    if not state.alerted_webhook_silence:
+    """Each asset class is checked independently against ITS OWN market
+    hours and ITS OWN last-webhook timestamp (state.last_webhook_at is
+    per-class -- see state.py). Independent, not one shared clock,
+    because a busy stock feed used to keep resetting a single global
+    timestamp and mask forex or crypto going silent at the same time.
+    Latching is per-class too, same shape as alerted_trading_halted."""
+    now = time.time()
+    for asset_class in ("stock", "forex", "crypto"):
+        if not _is_market_hours(asset_class):
+            continue
+        last = state.last_webhook_at.get(asset_class)
+        if last is None:
+            continue  # no /webhook hit for this class yet this run -- nothing to compare against
+        silent_for = now - last
+        if silent_for < WEBHOOK_SILENCE_THRESHOLD_SECONDS:
+            state.alerted_webhook_silence[asset_class] = False
+            continue
+        if state.alerted_webhook_silence.get(asset_class):
+            continue
         _post_to_discord(
-            "\U0001F507 No webhook activity for {:.1f} hours".format(silent_for / 3600),
-            "No /webhook calls have landed in over {:.0f} hours during market hours -- "
-            "check that TradingView alerts are still firing and reaching this server.".format(
-                WEBHOOK_SILENCE_THRESHOLD_SECONDS / 3600
+            "\U0001F507 No {} webhook activity for {:.1f} hours".format(asset_class, silent_for / 3600),
+            "No {} /webhook calls have landed in over {:.0f} hours while the {} market is "
+            "open -- check that TradingView alerts are still firing and reaching this "
+            "server. Other asset classes' feeds don't reset this clock.".format(
+                asset_class, WEBHOOK_SILENCE_THRESHOLD_SECONDS / 3600, asset_class
             ),
         )
         _trigger_github_dispatch("webhook-silence", {
+            "asset_class": asset_class,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "silent_for_hours": round(silent_for / 3600, 2),
-            "last_webhook_at": datetime.fromtimestamp(state.last_webhook_at, tz=timezone.utc).isoformat(),
-            "detail": "No /webhook calls received in over {:.0f} hours during market hours.".format(
-                WEBHOOK_SILENCE_THRESHOLD_SECONDS / 3600
+            "last_webhook_at": datetime.fromtimestamp(last, tz=timezone.utc).isoformat(),
+            "detail": "No {} /webhook calls received in over {:.0f} hours during {} market hours.".format(
+                asset_class, WEBHOOK_SILENCE_THRESHOLD_SECONDS / 3600, asset_class
             ),
         })
-        state.alerted_webhook_silence = True
+        state.alerted_webhook_silence[asset_class] = True
 
 
 def check_and_alert_broker_errors():

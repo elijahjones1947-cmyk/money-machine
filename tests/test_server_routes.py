@@ -149,6 +149,24 @@ def test_webhook_duplicate_successful_signal_rejected_and_logged(client, monkeyp
     assert calls == ["AAPL"]
 
 
+def test_webhook_stamps_silence_clock_only_for_its_own_asset_class(client):
+    """The webhook-silence clock (state.last_webhook_at) is per asset
+    class: a stock webhook must move ONLY stock's timestamp, so stock
+    activity can't mask forex/crypto going silent (the audit finding).
+    Stamped even on a bad-secret call -- the silence check is about
+    whether that class's alerts are REACHING this endpoint at all."""
+    import state
+
+    resp = client.post("/webhook", json={
+        "secret": "wrong", "action": "buy", "symbol": "AAPL",
+    })
+    assert resp.status_code == 401  # rejected -- but the class's clock still moves
+
+    assert state.last_webhook_at["stock"] is not None
+    assert state.last_webhook_at["forex"] is None
+    assert state.last_webhook_at["crypto"] is None
+
+
 def test_webhook_ip_allowlist_enforce_rejects_unlisted_ip(client, monkeypatch):
     monkeypatch.setattr(config, "WEBHOOK_IP_MODE", "enforce")
     # No X-Forwarded-For header -- Flask's test client's remote_addr

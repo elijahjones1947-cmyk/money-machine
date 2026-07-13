@@ -261,11 +261,12 @@ def _persist_health_snapshot():
     run_alert_checks cycle (5 min) -- a reader should treat this as
     accurate as of 'updated_at', not real-time.
 
-    'last_webhook_at' mirrors state.last_webhook_at exactly, which is
-    set for EVERY inbound /webhook call regardless of whether it passes
-    the secret check (see webhook() below) -- not just authenticated
-    ones. discord_bot.py should describe it that way rather than as
-    "last successful hit".
+    'last_webhook_at' mirrors state.last_webhook_at exactly -- a dict
+    keyed by asset class (stock/forex/crypto), each entry set for EVERY
+    inbound /webhook call carrying a symbol of that class regardless of
+    whether the call passes the secret check (see webhook() below) --
+    not just authenticated ones. discord_bot.py should describe it that
+    way rather than as "last successful hit".
     """
     try:
         db.save_setting("health_snapshot", {
@@ -752,14 +753,6 @@ def add_watchlist():
 def webhook():
     """External-facing route for TradingView alerts — requires the shared
     WEBHOOK_SECRET, never exposed to the browser."""
-    # Recorded for EVERY inbound call, before the secret check below --
-    # the webhook-silence alert (alerts.py) is about whether anything is
-    # reaching this endpoint at all, not just well-authenticated hits.
-    # Also clears the silence latch, so a later separate silent stretch
-    # can alert again instead of staying silenced forever after the first.
-    state.last_webhook_at = time.time()
-    state.alerted_webhook_silence = False
-
     data = request.json
 
     # Log every inbound webhook call regardless of outcome (secret
@@ -770,6 +763,23 @@ def webhook():
     if safe_data and 'secret' in safe_data:
         safe_data['secret'] = 'REDACTED'
     logging.info('Webhook received: {}'.format(safe_data))
+
+    # Per-asset-class silence clock: stamped for EVERY inbound call that
+    # carries a usable symbol, before the secret check below -- the
+    # webhook-silence alert (alerts.py) is about whether anything is
+    # reaching this endpoint for that asset class at all, not just
+    # well-authenticated hits. Only the incoming symbol's OWN asset
+    # class gets stamped: a busy stock feed resetting one shared global
+    # clock used to mask forex or crypto going silent at the same time.
+    # Also clears that class's silence latch, so a later separate silent
+    # stretch can alert again instead of staying silenced forever after
+    # the first. A call with no symbol at all (malformed JSON, missing
+    # fields) has no asset class to attribute and stamps nothing.
+    inbound_symbol = (data or {}).get('symbol')
+    if inbound_symbol and inbound_symbol not in ('{{TICKER}}', '{{ticker}}'):
+        inbound_class = asset_class_for_symbol(inbound_symbol)
+        state.last_webhook_at[inbound_class] = time.time()
+        state.alerted_webhook_silence[inbound_class] = False
 
     if not data:
         logging.warning('Rejected webhook call: no JSON body')

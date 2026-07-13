@@ -27,10 +27,10 @@ def clean_alert_state():
     reset before every test so they can't leak between tests."""
     state.alerted_account_halted = False
     state.alerted_trading_halted = {"stock": False, "forex": False, "crypto": False}
-    state.alerted_webhook_silence = False
+    state.alerted_webhook_silence = {"stock": False, "forex": False, "crypto": False}
     state.alerted_broker_errors = False
     state.broker_error_timestamps = []
-    state.last_webhook_at = None
+    state.last_webhook_at = {"stock": None, "forex": None, "crypto": None}
     state.last_broker_error_detail = None
     yield
 
@@ -136,14 +136,15 @@ def test_halt_dispatch_does_not_repeat_while_latched(monkeypatch):
 def test_webhook_silence_dispatches_to_github(monkeypatch):
     calls = []
     _capture_github_post(monkeypatch, calls)
-    monkeypatch.setattr(alerts, "_is_market_hours", lambda: True)
-    state.last_webhook_at = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
+    monkeypatch.setattr(alerts, "_is_market_hours", lambda asset_class, now_utc=None: True)
+    state.last_webhook_at["forex"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
 
     alerts.check_and_alert_webhook_silence()
 
     dispatches = [c for c in calls if c["url"] == alerts.GITHUB_DISPATCH_URL]
     assert len(dispatches) == 1
     assert dispatches[0]["json"]["event_type"] == "webhook-silence"
+    assert dispatches[0]["json"]["client_payload"]["asset_class"] == "forex"
     assert "silent_for_hours" in dispatches[0]["json"]["client_payload"]
 
 
@@ -168,24 +169,67 @@ def test_broker_errors_dispatch_includes_traceback_detail(monkeypatch):
 
 # --- _is_market_hours ------------------------------------------------
 
-def test_market_hours_weekday_during_session():
+def test_market_hours_stock_weekday_during_session():
     dt = datetime(2024, 1, 3, 15, 0, tzinfo=timezone.utc)  # Wed 10:00 EST
-    assert alerts._is_market_hours(dt) is True
+    assert alerts._is_market_hours("stock", dt) is True
 
 
-def test_market_hours_weekend():
+def test_market_hours_stock_weekend():
     dt = datetime(2024, 1, 6, 15, 0, tzinfo=timezone.utc)  # Sat 10:00 EST
-    assert alerts._is_market_hours(dt) is False
+    assert alerts._is_market_hours("stock", dt) is False
 
 
-def test_market_hours_before_open():
+def test_market_hours_stock_before_open():
     dt = datetime(2024, 1, 3, 12, 0, tzinfo=timezone.utc)  # Wed 07:00 EST
-    assert alerts._is_market_hours(dt) is False
+    assert alerts._is_market_hours("stock", dt) is False
 
 
-def test_market_hours_after_close():
+def test_market_hours_stock_after_close():
     dt = datetime(2024, 1, 3, 22, 0, tzinfo=timezone.utc)  # Wed 17:00 EST
-    assert alerts._is_market_hours(dt) is False
+    assert alerts._is_market_hours("stock", dt) is False
+
+
+def test_market_hours_crypto_is_always_open():
+    # 24/7 market -- includes times every other class is closed.
+    saturday_night = datetime(2024, 1, 7, 3, 0, tzinfo=timezone.utc)  # Sat 22:00 EST
+    weekday_overnight = datetime(2024, 1, 3, 8, 0, tzinfo=timezone.utc)  # Wed 03:00 EST
+    assert alerts._is_market_hours("crypto", saturday_night) is True
+    assert alerts._is_market_hours("crypto", weekday_overnight) is True
+
+
+def test_market_hours_forex_open_overnight_on_weekdays():
+    # 03:00 EST Wednesday: NYSE is closed, forex is not -- this is
+    # exactly the window the old NYSE-only gate went blind in.
+    dt = datetime(2024, 1, 3, 8, 0, tzinfo=timezone.utc)  # Wed 03:00 EST
+    assert alerts._is_market_hours("forex", dt) is True
+
+
+def test_market_hours_forex_sunday_open_boundary():
+    before_open = datetime(2024, 1, 7, 21, 30, tzinfo=timezone.utc)  # Sun 16:30 EST
+    after_open = datetime(2024, 1, 7, 22, 30, tzinfo=timezone.utc)   # Sun 17:30 EST
+    assert alerts._is_market_hours("forex", before_open) is False
+    assert alerts._is_market_hours("forex", after_open) is True
+
+
+def test_market_hours_forex_friday_close_boundary():
+    before_close = datetime(2024, 1, 5, 21, 30, tzinfo=timezone.utc)  # Fri 16:30 EST
+    after_close = datetime(2024, 1, 5, 22, 30, tzinfo=timezone.utc)   # Fri 17:30 EST
+    assert alerts._is_market_hours("forex", before_close) is True
+    assert alerts._is_market_hours("forex", after_close) is False
+
+
+def test_market_hours_forex_closed_saturday():
+    dt = datetime(2024, 1, 6, 15, 0, tzinfo=timezone.utc)  # Sat 10:00 EST
+    assert alerts._is_market_hours("forex", dt) is False
+
+
+def test_market_hours_forex_boundaries_are_dst_aware():
+    # Same 21:30 UTC clock time as the January (EST, UTC-5) Sunday
+    # boundary test above, but in July (EDT, UTC-4) that's already
+    # 17:30 ET -- open. A fixed-UTC-offset implementation would get
+    # exactly one of these two wrong.
+    july_sunday_2130_utc = datetime(2024, 7, 7, 21, 30, tzinfo=timezone.utc)  # Sun 17:30 EDT
+    assert alerts._is_market_hours("forex", july_sunday_2130_utc) is True
 
 
 # --- check_and_alert_bot_halted --------------------------------------
@@ -222,32 +266,83 @@ def test_trading_halted_latches_independently_per_asset_class():
 
 # --- check_and_alert_webhook_silence -----------------------------------
 
+def _all_markets_open(monkeypatch):
+    monkeypatch.setattr(alerts, "_is_market_hours", lambda asset_class, now_utc=None: True)
+
+
 def test_webhook_silence_no_alert_with_no_prior_hit(monkeypatch):
-    monkeypatch.setattr(alerts, "_is_market_hours", lambda: True)
-    state.last_webhook_at = None
+    _all_markets_open(monkeypatch)
     alerts.check_and_alert_webhook_silence()
-    assert state.alerted_webhook_silence is False
+    assert state.alerted_webhook_silence == {"stock": False, "forex": False, "crypto": False}
 
 
 def test_webhook_silence_no_alert_within_threshold(monkeypatch):
-    monkeypatch.setattr(alerts, "_is_market_hours", lambda: True)
-    state.last_webhook_at = time.time() - 60
+    _all_markets_open(monkeypatch)
+    state.last_webhook_at["stock"] = time.time() - 60
     alerts.check_and_alert_webhook_silence()
-    assert state.alerted_webhook_silence is False
+    assert state.alerted_webhook_silence["stock"] is False
 
 
 def test_webhook_silence_alerts_past_threshold_and_latches(monkeypatch):
-    monkeypatch.setattr(alerts, "_is_market_hours", lambda: True)
-    state.last_webhook_at = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
+    _all_markets_open(monkeypatch)
+    state.last_webhook_at["stock"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
     alerts.check_and_alert_webhook_silence()
-    assert state.alerted_webhook_silence is True
+    assert state.alerted_webhook_silence["stock"] is True
 
 
 def test_webhook_silence_not_checked_outside_market_hours(monkeypatch):
-    monkeypatch.setattr(alerts, "_is_market_hours", lambda: False)
-    state.last_webhook_at = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
+    monkeypatch.setattr(alerts, "_is_market_hours", lambda asset_class, now_utc=None: False)
+    state.last_webhook_at["stock"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
     alerts.check_and_alert_webhook_silence()
-    assert state.alerted_webhook_silence is False
+    assert state.alerted_webhook_silence["stock"] is False
+
+
+def test_webhook_silence_fresh_stock_activity_does_not_mask_silent_forex(monkeypatch):
+    """The exact audit finding: one asset class's webhook activity used
+    to reset a single shared clock and hide a different class going
+    silent at the same time. Stock is fresh, forex is stale -- only
+    forex may alert."""
+    calls = []
+    _capture_github_post(monkeypatch, calls)
+    _all_markets_open(monkeypatch)
+    now = time.time()
+    state.last_webhook_at["stock"] = now - 60  # fresh
+    state.last_webhook_at["forex"] = now - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1  # silent
+
+    alerts.check_and_alert_webhook_silence()
+
+    assert state.alerted_webhook_silence["forex"] is True
+    assert state.alerted_webhook_silence["stock"] is False
+    dispatches = [c for c in calls if c["url"] == alerts.GITHUB_DISPATCH_URL]
+    assert [d["json"]["client_payload"]["asset_class"] for d in dispatches] == ["forex"]
+
+
+def test_webhook_silence_gates_each_class_by_its_own_market_hours(monkeypatch):
+    """Crypto must be checked even when stock's and forex's markets are
+    closed -- under the old NYSE-only gate it was never checked at all."""
+    monkeypatch.setattr(
+        alerts, "_is_market_hours",
+        lambda asset_class, now_utc=None: asset_class == "crypto",
+    )
+    stale = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
+    state.last_webhook_at["stock"] = stale
+    state.last_webhook_at["crypto"] = stale
+
+    alerts.check_and_alert_webhook_silence()
+
+    assert state.alerted_webhook_silence["crypto"] is True
+    assert state.alerted_webhook_silence["stock"] is False  # its market is closed -- not checked
+
+
+def test_webhook_silence_latch_clears_when_class_goes_fresh_again(monkeypatch):
+    _all_markets_open(monkeypatch)
+    state.last_webhook_at["crypto"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
+    alerts.check_and_alert_webhook_silence()
+    assert state.alerted_webhook_silence["crypto"] is True
+
+    state.last_webhook_at["crypto"] = time.time()  # a webhook landed again
+    alerts.check_and_alert_webhook_silence()
+    assert state.alerted_webhook_silence["crypto"] is False  # ready to alert on the NEXT silence
 
 
 # --- record_broker_error / check_and_alert_broker_errors ---------------

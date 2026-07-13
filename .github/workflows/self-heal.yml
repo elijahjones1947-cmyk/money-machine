@@ -121,11 +121,14 @@ jobs:
               usage, run_position_safety_checks), and state.py (risk_caps) before concluding
               either way.
 
-            - webhook-silence: no request has reached the /webhook route in over the
-              configured threshold during US stock market hours (see alerts.py). Since
-              server.py sets state.last_webhook_at as the very first line of webhook(),
-              before any request parsing, this means requests aren't reaching the process at
-              all -- usually a TradingView-side or network/infra issue with NOTHING to fix in
+            - webhook-silence: no request carrying a symbol of the asset class named in
+              client_payload.asset_class has reached the /webhook route in over the
+              configured threshold while that class's market was open (see alerts.py --
+              hours are per asset class: NYSE for stock, Sun-Fri 5pm ET for forex, 24/7 for
+              crypto). server.py stamps state.last_webhook_at[asset_class] for every inbound
+              call with a usable symbol, before the secret check, so this means requests for
+              that asset class aren't reaching the process at all
+              -- usually a TradingView-side or network/infra issue with NOTHING to fix in
               this repository. Only treat this as a real bug if you find an actual code-level
               cause inside this repo, e.g. a routing conflict (server.py has a documented
               history of exactly this kind of bug -- read the comment above
