@@ -6,6 +6,38 @@ import { dailyPnlByAssetClass } from '../utils/equityByClass.js';
 const ASSET_CLASS_COLORS = { stock: '#7ab8ff', forex: '#39ff8f', crypto: '#ffce54' };
 const ASSET_CLASS_LABELS = { stock: 'Stock', forex: 'Forex', crypto: 'Crypto' };
 
+// `acct` is the raw {equity, buying_power, last_equity} shape server.py
+// sends per broker. `last_equity` is each broker's own prior-close
+// snapshot, so "today" here is per-broker, not the bot's tracked
+// starting_equity_today (that figure is combined-only).
+function BrokerEquityCard({ title, acct }) {
+  const change = acct?.last_equity != null ? acct.equity - acct.last_equity : null;
+  const changePct = change != null && acct.last_equity ? (change / acct.last_equity) * 100 : null;
+  return (
+    <div>
+      <div className="section-title">{title}</div>
+      <div className="card">
+        <div className="stat-grid">
+          <div className="stat-card">
+            <span className="metric-label">Equity</span>
+            <span className="metric-value">{acct?.equity != null ? `$${acct.equity.toLocaleString()}` : '—'}</span>
+          </div>
+          <div className="stat-card">
+            <span className="metric-label">Today</span>
+            <span className={`metric-value ${change >= 0 ? 'positive' : 'negative'}`}>
+              {change != null ? `${change >= 0 ? '+' : ''}$${change.toFixed(2)} (${changePct >= 0 ? '+' : ''}${changePct.toFixed(2)}%)` : '—'}
+            </span>
+          </div>
+          <div className="stat-card">
+            <span className="metric-label">Buying power</span>
+            <span className="metric-value">{acct?.buying_power != null ? `$${acct.buying_power.toLocaleString()}` : '—'}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function EquityDetail() {
   const { data, loading } = useDashboard();
 
@@ -19,6 +51,9 @@ export function EquityDetail() {
 
   const allTimeLow = values.length ? Math.min(...values) : null;
   const allTimeHigh = values.length ? Math.max(...values) : null;
+
+  const stockAcct = data?.stock_account;
+  const forexAcct = data?.forex_account;
 
   const trades = data?.trades ?? [];
   const positions = data?.positions ?? [];
@@ -78,6 +113,11 @@ export function EquityDetail() {
             ) : (
               <div className="empty-state">Not enough equity history yet — this fills in as the bot runs.</div>
             )}
+          </div>
+
+          <div className="two-col-grid section">
+            <BrokerEquityCard title="Alpaca (stock + crypto)" acct={stockAcct} />
+            <BrokerEquityCard title="OANDA (forex)" acct={forexAcct} />
           </div>
 
           <div className="section">
