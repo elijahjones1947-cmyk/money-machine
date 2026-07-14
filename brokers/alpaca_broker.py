@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import alpaca_trade_api as tradeapi
 from alpaca_trade_api.rest import TimeFrame, TimeFrameUnit
@@ -26,6 +26,26 @@ _TIMEFRAME_MAP = {
 # under Alpaca's per-request bar cap regardless of installed SDK
 # version, instead of depending on the SDK's own pagination behavior.
 _HISTORICAL_CHUNK_DAYS = 30
+
+_BAR_DURATION = {
+    "1m": timedelta(minutes=1),
+    "5m": timedelta(minutes=5),
+    "15m": timedelta(minutes=15),
+    "1h": timedelta(hours=1),
+    "4h": timedelta(hours=4),
+    "1d": timedelta(days=1),
+}
+
+# get_ohlcv() needs a `start` far enough back that `limit` bars have
+# actually occurred by "now" -- Alpaca's `limit` param returns the
+# EARLIEST bars within [start, end], not the latest, so a start that's
+# too close to "now" silently truncates to whatever few bars exist so
+# far today (this is what caused AAPL/BTC regime checks to see 1-13
+# bars instead of the requested 100, always classifying as 'unknown').
+# Stocks only trade ~6.5h of each 24h weekday and are closed weekends,
+# so their calendar lookback needs a much larger safety multiple than
+# crypto's continuous 24/7 market.
+_LOOKBACK_MULTIPLIER = {"stock": 6, "crypto": 1.5}
 
 
 class AlpacaBroker(BrokerInterface):
@@ -107,18 +127,27 @@ class AlpacaBroker(BrokerInterface):
 
     def get_ohlcv(self, symbol, timeframe="1h", limit=100):
         tf = _TIMEFRAME_MAP.get(timeframe)
-        if tf is None:
+        bar_duration = _BAR_DURATION.get(timeframe)
+        if tf is None or bar_duration is None:
             raise ValueError("Unsupported timeframe: {}".format(timeframe))
         try:
             is_crypto = "/" in symbol
+            multiplier = _LOOKBACK_MULTIPLIER["crypto" if is_crypto else "stock"]
+            start = datetime.now(timezone.utc) - (bar_duration * limit * multiplier)
+            start_str = start.isoformat()
             if is_crypto:
-                bars = self.client.get_crypto_bars(symbol, tf, limit=limit)
+                bars = self.client.get_crypto_bars(symbol, tf, start=start_str, limit=10000)
             else:
-                bars = self.client.get_bars(symbol, tf, limit=limit, feed="iex")
+                bars = self.client.get_bars(symbol, tf, start=start_str, limit=10000, feed="iex")
                 # feed="iex": free/basic Alpaca market data plans don't
                 # permit querying recent SIP data (the default feed) —
                 # IEX is included on every plan and has no such recency gate.
-            df = bars.df
+            # Fetched with a wide start window + large API-side limit
+            # (above), then trimmed to the actual requested count here —
+            # NOT by passing `limit` to the API call itself, since that
+            # would return the earliest `limit` bars in the window
+            # instead of the most recent ones.
+            df = bars.df.tail(limit)
             return [
                 {
                     "time": idx.to_pydatetime(),
