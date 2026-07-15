@@ -27,9 +27,9 @@ from backtest.regime_tagging import tag_trades_with_regime
 from backtest.metrics import compute_metrics, compute_equity_curve
 
 DEFAULT_TARGETS = [
-    {"asset_class": "stock", "symbol": "AAPL", "timeframe": "1h"},
+    {"asset_class": "stock", "symbol": "AAPL", "timeframe": "30m"},
     {"asset_class": "forex", "symbol": "EUR_USD", "timeframe": "1h"},
-    {"asset_class": "crypto", "symbol": "BTC/USD", "timeframe": "1h"},
+    {"asset_class": "crypto", "symbol": "BTC/USD", "timeframe": "30m"},
 ]
 
 

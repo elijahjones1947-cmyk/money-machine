@@ -171,10 +171,12 @@ def load_persisted_state():
 load_persisted_state()
 
 # --- Market regime classifier scheduler ----------------------------------
-# Matches each asset class's alert timeframe from TradingView: 1h for
-# stock/crypto, 15m for forex. Runs independently of trading itself — a
+# Matches each asset class's alert timeframe from TradingView: 30m for
+# stock/crypto (shortened from 1h in the "more active" tuning pass —
+# forex left at 15m since it was already short relative to its 0.35%
+# SL band), 15m for forex. Runs independently of trading itself — a
 # failure here should never affect order placement, only logging quality.
-_REGIME_TIMEFRAMES = {"stock": "1h", "forex": "15m", "crypto": "1h"}
+_REGIME_TIMEFRAMES = {"stock": "30m", "forex": "15m", "crypto": "30m"}
 
 
 def run_regime_checks():
@@ -457,7 +459,7 @@ def _sanity_check_signal(broker, symbol, asset_class, action):
     try:
         timeframe = _REGIME_TIMEFRAMES.get(asset_class, "1h")
         bars = broker.get_ohlcv(symbol, timeframe=timeframe, limit=100)
-        if len(bars) < 40:  # not enough history to warm up EMA-slow(21)/RSI(14)/lookback(10) reliably
+        if len(bars) < 40:  # not enough history to warm up EMA-slow(21)/RSI(14)/lookback(7) reliably
             return
         signals = compute_signals(bars)
         latest = signals[-1]

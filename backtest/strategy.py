@@ -9,21 +9,28 @@ Operates on plain OHLCV bar lists (oldest first) so it works
 identically for stocks, forex, and crypto — the Pine script itself is
 asset-agnostic; only the alert's target symbol changes on TradingView.
 
-Defaults below match the script's input.*() defaults exactly:
-  lookback=10, breakoutBuffer=0.05%, emaFast=9, emaSlow=21,
-  takeProfit=0.60%, stopLoss=0.35%, rsiLength=14, rsiMin=50.
+Defaults below match the script's input.*() defaults as of the
+"more active" tuning pass (moderate loosening of entry frequency --
+see the trade-frequency investigation this followed):
+  lookback=7, breakoutBuffer=0.03%, emaFast=9, emaSlow=21,
+  takeProfit=0.60%, stopLoss=0.35%, rsiLength=14, rsiMin=45.
+
+Previous defaults (pre-tuning) were lookback=10, breakoutBuffer=0.05%,
+rsiMin=50 -- kept here for reference since reverting on TradingView
+means reverting these too, to keep the sanity-check/backtest honest
+against whatever's actually live.
 """
 
 DEFAULT_PARAMS = {
-    "lookback": 10,               # Higher High Lookback
-    "breakout_buffer_pct": 0.05,  # Breakout Buffer %
+    "lookback": 7,                # Higher High Lookback
+    "breakout_buffer_pct": 0.03,  # Breakout Buffer %
     "ema_fast_length": 9,
     "ema_slow_length": 21,
     "take_profit_pct": 0.60,
     "stop_loss_pct": 0.35,
     "use_rsi_filter": True,
     "rsi_length": 14,
-    "rsi_min": 50,
+    "rsi_min": 45,
 }
 
 

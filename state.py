@@ -9,9 +9,9 @@ trade_log = []  # each entry now includes an 'asset_class' field
 equity_history = {"times": [], "values": []}  # combined equity, both brokers
 
 watched_symbols = {
-    "stock": ["AAPL"],
-    "forex": ["EUR_USD"],
-    "crypto": ["BTC/USD"],
+    "stock": ["AAPL", "MSFT", "NVDA", "SPY"],
+    "forex": ["EUR_USD", "GBP_USD", "USD_JPY"],
+    "crypto": ["BTC/USD", "ETH/USD", "SOL/USD"],
 }
 
 bot_enabled = True  # manual global kill switch (overrides all asset classes)
