@@ -806,6 +806,35 @@ def add_watchlist():
     return jsonify({'status': 'exists'})
 
 
+@app.errorhandler(400)
+@app.errorhandler(415)
+def _handle_webhook_parse_failure(e):
+    """Flask raises these (via request.json) BEFORE webhook() below ever
+    runs, for a wrong Content-Type (415) or a body that isn't valid JSON
+    at all (400 -- e.g. smart/curly quotes from copy-pasting a
+    TradingView alert message, a trailing comma, an unclosed brace).
+    Without this handler, that failure is completely invisible to
+    us -- webhook()'s own logging never executes, so nothing reaches
+    error_log and the only trace is TradingView's own alert-delivery
+    log. Only special-cased for /webhook: every other route's explicit
+    `return jsonify(...), 400` is a normal return value, not a raised
+    exception, so this handler never sees those and can't affect them.
+    """
+    if request.path == '/webhook':
+        raw_body = request.get_data(as_text=True) or ''
+        if WEBHOOK_SECRET:
+            raw_body = raw_body.replace(WEBHOOK_SECRET, 'REDACTED')
+        logging.warning(
+            'Webhook request rejected before reaching /webhook\'s own validation '
+            '(Content-Type={!r}, HTTP {} {}) -- check for malformed JSON in the '
+            'TradingView alert message (smart quotes, trailing comma, missing '
+            'brace, etc). Raw body (secret redacted): {}'.format(
+                request.content_type, e.code, e.name, raw_body[:500]
+            )
+        )
+    return e.get_response()
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """External-facing route for TradingView alerts — requires the shared
