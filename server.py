@@ -421,14 +421,28 @@ def _get_held_qty(broker, symbol):
     `symbol` arrives in this app's slash format ('BTC/USD') while
     Alpaca's positions come back without the separator ('BTCUSD') --
     normalize before comparing, or a crypto sell never matches its own
-    real position and gets wrongly rejected with 'no position to sell'."""
-    try:
-        for p in broker.get_positions():
+    real position and gets wrongly rejected with 'no position to sell'.
+
+    Retries get_positions() once if the symbol isn't found on the first
+    read -- a transient gap in Alpaca's own position data can otherwise
+    look identical to genuinely holding nothing (seen live: a real
+    position came back empty on the first read, wrongly rejecting a
+    sell as 'no position to sell')."""
+    def _find(positions):
+        for p in positions:
             held_symbol = p.symbol
             if getattr(p, 'asset_class', None) == 'crypto':
                 held_symbol = _normalize_alpaca_crypto_symbol(held_symbol)
             if held_symbol == symbol:
                 return float(p.qty)
+        return None
+
+    try:
+        qty = _find(broker.get_positions())
+        if qty is None:
+            qty = _find(broker.get_positions())
+        if qty is not None:
+            return qty
     except BrokerConnectionError as e:
         logging.warning("Could not check held position for {}: {}".format(symbol, e))
     return 0.0
