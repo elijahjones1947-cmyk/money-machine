@@ -329,6 +329,119 @@ def test_sanity_check_sell_branch_logs_warning_instead_of_throwing(app_module, r
     assert not any("Sanity check skipped" in m for m in messages)
 
 
+def test_manual_close_requires_auth(client):
+    resp = client.post("/api/manual_close", json={"symbol": "AAPL"})
+    assert resp.status_code == 401
+
+
+def test_manual_close_missing_symbol_rejected(auth_client):
+    resp = auth_client.post("/api/manual_close", json={})
+    assert resp.status_code == 400
+    assert resp.get_json()["error"] == "missing symbol"
+
+
+def test_manual_close_rejects_symbol_with_no_open_position(auth_client):
+    resp = auth_client.post("/api/manual_close", json={"symbol": "AAPL"})
+    assert resp.status_code == 400
+    assert "no open position" in resp.get_json()["error"]
+
+
+def test_manual_close_sells_full_long_stock_position(auth_client, monkeypatch):
+    """Closing a long stock position must SELL exactly the currently-held
+    quantity (the same source of truth get_all_positions()/the dashboard's
+    own positions table use), tagged with source='manual_close' so it's
+    distinguishable from a strategy or safety-net exit."""
+    import server
+    import state
+
+    fake_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="31",
+        avg_entry_price="210.00", current_price="212.50", unrealized_pl="77.50",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    resp = auth_client.post("/api/manual_close", json={"symbol": "AAPL"})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "order placed"
+    assert body["qty"] == 31.0
+
+    last_trade = state.trade_log[-1]
+    assert last_trade["action"] == "sell"
+    assert last_trade["symbol"] == "AAPL"
+    assert last_trade["source"] == "manual_close"
+
+
+def test_manual_close_buys_back_a_short_forex_position(auth_client, monkeypatch):
+    """Forex positions can be short (unlike stock/crypto, which are
+    always long here) -- closing a short must BUY it back, not sell
+    further. Mirrors run_position_safety_checks()'s own direction-aware
+    close_action logic."""
+    import server
+    import state
+
+    fake_oanda_position = {
+        "instrument": "GBP_JPY",
+        "long": {"units": "0", "unrealizedPL": "0"},
+        "short": {"units": "-500", "averagePrice": "190.123", "unrealizedPL": "-12.50"},
+    }
+    monkeypatch.setattr(server.oanda_broker, "get_positions", lambda: [fake_oanda_position])
+
+    resp = auth_client.post("/api/manual_close", json={"symbol": "GBP_JPY"})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "order placed"
+    assert body["qty"] == 500.0
+
+    last_trade = state.trade_log[-1]
+    assert last_trade["action"] == "buy"
+    assert last_trade["symbol"] == "GBP_JPY"
+    assert last_trade["source"] == "manual_close"
+
+
+def test_manual_close_logs_a_warning_distinctly_tagged_as_manual(auth_client, monkeypatch, caplog):
+    """Must land in error_log (DBLogHandler only mirrors WARNING+) with
+    wording that makes clear this was an operator override, not an
+    automated exit -- so discord_bot.py's Q&A bot and a human reading
+    error_log later can't mistake one for the other."""
+    import server
+
+    fake_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="31",
+        avg_entry_price="210.00", current_price="212.50", unrealized_pl="77.50",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    with caplog.at_level(logging.WARNING):
+        resp = auth_client.post("/api/manual_close", json={"symbol": "AAPL"})
+    assert resp.status_code == 200
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("MANUAL CLOSE" in m and "AAPL" in m for m in messages)
+
+
+def test_manual_close_bypasses_bot_paused_and_max_trades(auth_client, monkeypatch):
+    """An operator explicitly closing a position must never be blocked by
+    bot_enabled=False or the daily trade cap -- same reasoning as the
+    safety net's force_close_qty path, and the same bypass a strategy
+    exit already gets via reduces_position."""
+    import server
+    import state
+
+    state.bot_enabled = False
+    state.trades_today["stock"] = state.max_trades_per_day["stock"]
+
+    fake_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="31",
+        avg_entry_price="210.00", current_price="212.50", unrealized_pl="77.50",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    resp = auth_client.post("/api/manual_close", json={"symbol": "AAPL"})
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "order placed"
+
+
 def test_backtest_response_includes_live_performance_key(auth_client):
     resp = auth_client.get("/api/backtest")
     assert resp.status_code == 200

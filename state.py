@@ -10,7 +10,7 @@ equity_history = {"times": [], "values": []}  # combined equity, both brokers
 
 watched_symbols = {
     "stock": ["AAPL", "MSFT", "NVDA", "SPY"],
-    "forex": ["EUR_USD", "GBP_USD", "USD_JPY"],
+    "forex": ["EUR_USD", "GBP_USD", "USD_JPY", "GBP_JPY"],
     "crypto": ["BTC/USD", "ETH/USD", "SOL/USD"],
 }
 

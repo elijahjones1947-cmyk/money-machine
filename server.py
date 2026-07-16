@@ -937,22 +937,73 @@ def api_manual_trade():
     return _process_trade_signal(action, symbol, is_manual=True, source='manual')
 
 
+@app.route('/api/manual_close', methods=['POST'])
+def api_manual_close():
+    """SPA-facing route for the dashboard's per-position "Close" button
+    (session-gated, same as /api/manual_trade above). Looks up
+    `symbol`'s CURRENT real position (get_all_positions(), the same
+    source of truth run_position_safety_checks() and the dashboard's own
+    positions table use) and closes exactly that quantity via the same
+    force-close path the safety net uses -- _process_trade_signal with
+    force_close_qty set -- rather than re-deriving a size from the risk
+    formula. Direction-aware like run_position_safety_checks(): closing a
+    forex SHORT means buying it back, not selling further.
+
+    Rejects with 400 if `symbol` has no open position right now (the
+    frontend already only shows this button for symbols with one, but a
+    position can close on its own — e.g. a TradingView exit landing —
+    between page load and the click, so this is a real check, not
+    defensive dead code).
+
+    Logged as a WARNING (not just the normal INFO trade-summary line
+    every path already gets) specifically so this lands in error_log
+    distinctly tagged as an operator-initiated override -- mirrors
+    run_position_safety_checks()'s own logging.error(...) call
+    immediately before ITS force-close, for the same reason: a full
+    audit trail of every force-close needs to say WHY, not just what."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+    data = request.json or {}
+    symbol = data.get('symbol')
+    if not symbol:
+        return jsonify({'error': 'missing symbol'}), 400
+
+    position = next((p for p in get_all_positions() if p['symbol'] == symbol), None)
+    if position is None:
+        return jsonify({'error': 'no open position for {} (nothing to close)'.format(symbol)}), 400
+
+    close_action = 'sell' if position['direction'] == 'long' else 'buy'
+    logging.warning(
+        'MANUAL CLOSE requested via dashboard: {} {} {} {} units (direction={}, unrealized_pl={:.2f}) '
+        '-- operator-initiated, not a strategy or safety-net exit.'.format(
+            close_action, position['asset_class'], symbol, position['qty'],
+            position['direction'], position['unrealized_pl'],
+        )
+    )
+    return _process_trade_signal(
+        close_action, symbol, is_manual=True, source='manual_close', force_close_qty=position['qty'],
+    )
+
+
 def _process_trade_signal(action, symbol, is_manual, source='webhook', force_close_qty=None):
     """Shared by /webhook (TradingView, secret-gated), /api/manual_trade
-    (dashboard buttons, session-gated), AND run_position_safety_checks()
-    (the automatic stop-loss monitor) — sizes, risk checks, executes,
-    and logs a trade signal identically regardless of where it came
-    from.
+    (dashboard buttons, session-gated), /api/manual_close (the
+    dashboard's per-position "Close" button, also session-gated), AND
+    run_position_safety_checks() (the automatic stop-loss monitor) --
+    sizes, risk checks, executes, and logs a trade signal identically
+    regardless of where it came from.
 
     `source` is persisted on the trade for the UI to show ('webhook',
-    'manual', or 'safety_stop_loss') -- distinguishing a normal strategy
-    exit from an emergency one matters, don't let it get lost.
+    'manual', 'manual_close', or 'safety_stop_loss') -- distinguishing a
+    normal strategy exit, an operator's manual override, and an
+    emergency one matters, don't let it get lost.
 
     `force_close_qty`, when set, means "close exactly this much, right
-    now" (used by the safety-net monitor): skips bot_enabled/max-trades/
-    dedup entirely (an emergency exit must never be blocked by them)
-    and skips the normal per-asset-class sizing math in favor of using
-    the exact currently-held quantity.
+    now" (used by the safety-net monitor AND /api/manual_close): skips
+    bot_enabled/max-trades/dedup entirely (an emergency exit -- or an
+    operator explicitly asking to exit right now -- must never be
+    blocked by them) and skips the normal per-asset-class sizing math in
+    favor of using the exact currently-held quantity.
     """
     check_daily_rollover()
 
@@ -1097,7 +1148,11 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
 
         broker.place_order(symbol, action, size)
         order_placed = True
-        log_prefix = 'SAFETY-NET FORCED CLOSE: ' if is_forced_close else ''
+        log_prefix = (
+            'SAFETY-NET FORCED CLOSE: ' if source == 'safety_stop_loss'
+            else 'MANUAL CLOSE: ' if source == 'manual_close'
+            else ''
+        )
         logging.info('{}{} {} {} of {} ({})'.format(log_prefix, action.upper(), size, asset_class, symbol, config.TRADING_MODE))
 
         # Attach whatever regime tag we most recently computed for this

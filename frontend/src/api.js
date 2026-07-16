@@ -44,6 +44,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ action, symbol }),
     }),
+  manualClose: (symbol) =>
+    request('/api/manual_close', {
+      method: 'POST',
+      body: JSON.stringify({ symbol }),
+    }),
 
   backtest: () => request('/api/backtest'),
 
