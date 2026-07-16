@@ -24,14 +24,24 @@ import state
 @pytest.fixture(autouse=True)
 def clean_alert_state():
     """alerts.py's latches/rolling log live on the shared state module --
-    reset before every test so they can't leak between tests."""
+    reset before every test so they can't leak between tests. Also pins
+    watched_symbols to a known set (check_and_alert_webhook_silence
+    iterates it to know which symbols/asset classes to check) so these
+    tests don't depend on whatever another test file's /api/watchlist
+    calls may have appended to the real module-level dict earlier in
+    the same pytest session."""
     state.alerted_account_halted = False
     state.alerted_trading_halted = {"stock": False, "forex": False, "crypto": False}
-    state.alerted_webhook_silence = {"stock": False, "forex": False, "crypto": False}
+    state.alerted_webhook_silence = {}
     state.alerted_broker_errors = False
     state.broker_error_timestamps = []
-    state.last_webhook_at = {"stock": None, "forex": None, "crypto": None}
+    state.last_webhook_at = {}
     state.last_broker_error_detail = None
+    state.watched_symbols = {
+        "stock": ["AAPL", "MSFT", "NVDA", "SPY"],
+        "forex": ["EUR_USD", "GBP_USD", "USD_JPY"],
+        "crypto": ["BTC/USD", "ETH/USD", "SOL/USD"],
+    }
     yield
 
 
@@ -137,13 +147,14 @@ def test_webhook_silence_dispatches_to_github(monkeypatch):
     calls = []
     _capture_github_post(monkeypatch, calls)
     monkeypatch.setattr(alerts, "_is_market_hours", lambda asset_class, now_utc=None: True)
-    state.last_webhook_at["forex"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
+    state.last_webhook_at["EUR_USD"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
 
     alerts.check_and_alert_webhook_silence()
 
     dispatches = [c for c in calls if c["url"] == alerts.GITHUB_DISPATCH_URL]
     assert len(dispatches) == 1
     assert dispatches[0]["json"]["event_type"] == "webhook-silence"
+    assert dispatches[0]["json"]["client_payload"]["symbol"] == "EUR_USD"
     assert dispatches[0]["json"]["client_payload"]["asset_class"] == "forex"
     assert "silent_for_hours" in dispatches[0]["json"]["client_payload"]
 
@@ -273,48 +284,66 @@ def _all_markets_open(monkeypatch):
 def test_webhook_silence_no_alert_with_no_prior_hit(monkeypatch):
     _all_markets_open(monkeypatch)
     alerts.check_and_alert_webhook_silence()
-    assert state.alerted_webhook_silence == {"stock": False, "forex": False, "crypto": False}
+    assert state.alerted_webhook_silence == {}
 
 
 def test_webhook_silence_no_alert_within_threshold(monkeypatch):
     _all_markets_open(monkeypatch)
-    state.last_webhook_at["stock"] = time.time() - 60
+    state.last_webhook_at["AAPL"] = time.time() - 60
     alerts.check_and_alert_webhook_silence()
-    assert state.alerted_webhook_silence["stock"] is False
+    assert state.alerted_webhook_silence["AAPL"] is False
 
 
 def test_webhook_silence_alerts_past_threshold_and_latches(monkeypatch):
     _all_markets_open(monkeypatch)
-    state.last_webhook_at["stock"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
+    state.last_webhook_at["AAPL"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
     alerts.check_and_alert_webhook_silence()
-    assert state.alerted_webhook_silence["stock"] is True
+    assert state.alerted_webhook_silence["AAPL"] is True
 
 
 def test_webhook_silence_not_checked_outside_market_hours(monkeypatch):
     monkeypatch.setattr(alerts, "_is_market_hours", lambda asset_class, now_utc=None: False)
-    state.last_webhook_at["stock"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
+    state.last_webhook_at["AAPL"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
     alerts.check_and_alert_webhook_silence()
-    assert state.alerted_webhook_silence["stock"] is False
+    assert state.alerted_webhook_silence.get("AAPL") is None  # its class's market never opened -- never checked
 
 
-def test_webhook_silence_fresh_stock_activity_does_not_mask_silent_forex(monkeypatch):
-    """The exact audit finding: one asset class's webhook activity used
-    to reset a single shared clock and hide a different class going
-    silent at the same time. Stock is fresh, forex is stale -- only
-    forex may alert."""
+def test_webhook_silence_fresh_symbol_does_not_mask_silent_symbol_in_same_class(monkeypatch):
+    """The exact audit finding: one symbol's webhook activity used to
+    reset a single shared per-asset-class clock and hide a DIFFERENT
+    symbol in the SAME class going silent at the same time. NVDA (stock)
+    is fresh, AAPL (also stock) is stale -- only AAPL may alert."""
     calls = []
     _capture_github_post(monkeypatch, calls)
     _all_markets_open(monkeypatch)
     now = time.time()
-    state.last_webhook_at["stock"] = now - 60  # fresh
-    state.last_webhook_at["forex"] = now - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1  # silent
+    state.last_webhook_at["NVDA"] = now - 60  # fresh
+    state.last_webhook_at["AAPL"] = now - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1  # silent
 
     alerts.check_and_alert_webhook_silence()
 
-    assert state.alerted_webhook_silence["forex"] is True
-    assert state.alerted_webhook_silence["stock"] is False
+    assert state.alerted_webhook_silence["AAPL"] is True
+    assert state.alerted_webhook_silence["NVDA"] is False
     dispatches = [c for c in calls if c["url"] == alerts.GITHUB_DISPATCH_URL]
-    assert [d["json"]["client_payload"]["asset_class"] for d in dispatches] == ["forex"]
+    assert [d["json"]["client_payload"]["symbol"] for d in dispatches] == ["AAPL"]
+
+
+def test_webhook_silence_fresh_stock_activity_does_not_mask_silent_forex(monkeypatch):
+    """Cross-class independence still holds too: a fresh stock symbol
+    must not mask a silent forex symbol."""
+    calls = []
+    _capture_github_post(monkeypatch, calls)
+    _all_markets_open(monkeypatch)
+    now = time.time()
+    state.last_webhook_at["AAPL"] = now - 60  # fresh
+    state.last_webhook_at["EUR_USD"] = now - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1  # silent
+
+    alerts.check_and_alert_webhook_silence()
+
+    assert state.alerted_webhook_silence["EUR_USD"] is True
+    assert state.alerted_webhook_silence["AAPL"] is False
+    dispatches = [c for c in calls if c["url"] == alerts.GITHUB_DISPATCH_URL]
+    assert [d["json"]["client_payload"]["symbol"] for d in dispatches] == ["EUR_USD"]
 
 
 def test_webhook_silence_gates_each_class_by_its_own_market_hours(monkeypatch):
@@ -325,24 +354,24 @@ def test_webhook_silence_gates_each_class_by_its_own_market_hours(monkeypatch):
         lambda asset_class, now_utc=None: asset_class == "crypto",
     )
     stale = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
-    state.last_webhook_at["stock"] = stale
-    state.last_webhook_at["crypto"] = stale
+    state.last_webhook_at["AAPL"] = stale
+    state.last_webhook_at["BTC/USD"] = stale
 
     alerts.check_and_alert_webhook_silence()
 
-    assert state.alerted_webhook_silence["crypto"] is True
-    assert state.alerted_webhook_silence["stock"] is False  # its market is closed -- not checked
+    assert state.alerted_webhook_silence["BTC/USD"] is True
+    assert state.alerted_webhook_silence.get("AAPL") is None  # its market is closed -- not checked
 
 
-def test_webhook_silence_latch_clears_when_class_goes_fresh_again(monkeypatch):
+def test_webhook_silence_latch_clears_when_symbol_goes_fresh_again(monkeypatch):
     _all_markets_open(monkeypatch)
-    state.last_webhook_at["crypto"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
+    state.last_webhook_at["BTC/USD"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
     alerts.check_and_alert_webhook_silence()
-    assert state.alerted_webhook_silence["crypto"] is True
+    assert state.alerted_webhook_silence["BTC/USD"] is True
 
-    state.last_webhook_at["crypto"] = time.time()  # a webhook landed again
+    state.last_webhook_at["BTC/USD"] = time.time()  # a webhook landed again
     alerts.check_and_alert_webhook_silence()
-    assert state.alerted_webhook_silence["crypto"] is False  # ready to alert on the NEXT silence
+    assert state.alerted_webhook_silence["BTC/USD"] is False  # ready to alert on the NEXT silence
 
 
 # --- record_broker_error / check_and_alert_broker_errors ---------------

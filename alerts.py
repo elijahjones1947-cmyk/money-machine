@@ -223,43 +223,48 @@ def check_and_alert_bot_halted(risk_manager):
 
 
 def check_and_alert_webhook_silence():
-    """Each asset class is checked independently against ITS OWN market
-    hours and ITS OWN last-webhook timestamp (state.last_webhook_at is
-    per-class -- see state.py). Independent, not one shared clock,
-    because a busy stock feed used to keep resetting a single global
-    timestamp and mask forex or crypto going silent at the same time.
-    Latching is per-class too, same shape as alerted_trading_halted."""
+    """Each SYMBOL is checked independently against its own asset class's
+    market hours and its own last-webhook timestamp (state.last_webhook_at
+    is per-symbol -- see state.py). Iterates state.watched_symbols (which
+    is exactly the set of symbols the bot cares about, kept up to date by
+    /api/watchlist) to know which symbols exist and which asset class's
+    market hours gate each one. Per-symbol, not per-asset-class, because a
+    busy symbol (e.g. NVDA firing every 30m) used to reset a single shared
+    per-class clock and mask a DIFFERENT symbol in the SAME class (e.g.
+    AAPL) going silent at the same time. Latching is per-symbol too, same
+    shape as alerted_trading_halted."""
     now = time.time()
-    for asset_class in ("stock", "forex", "crypto"):
+    for asset_class, symbols in state.watched_symbols.items():
         if not _is_market_hours(asset_class):
             continue
-        last = state.last_webhook_at.get(asset_class)
-        if last is None:
-            continue  # no /webhook hit for this class yet this run -- nothing to compare against
-        silent_for = now - last
-        if silent_for < WEBHOOK_SILENCE_THRESHOLD_SECONDS:
-            state.alerted_webhook_silence[asset_class] = False
-            continue
-        if state.alerted_webhook_silence.get(asset_class):
-            continue
-        _post_to_discord(
-            "\U0001F507 No {} webhook activity for {:.1f} hours".format(asset_class, silent_for / 3600),
-            "No {} /webhook calls have landed in over {:.0f} hours while the {} market is "
-            "open -- check that TradingView alerts are still firing and reaching this "
-            "server. Other asset classes' feeds don't reset this clock.".format(
-                asset_class, WEBHOOK_SILENCE_THRESHOLD_SECONDS / 3600, asset_class
-            ),
-        )
-        _trigger_github_dispatch("webhook-silence", {
-            "asset_class": asset_class,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "silent_for_hours": round(silent_for / 3600, 2),
-            "last_webhook_at": datetime.fromtimestamp(last, tz=timezone.utc).isoformat(),
-            "detail": "No {} /webhook calls received in over {:.0f} hours during {} market hours.".format(
-                asset_class, WEBHOOK_SILENCE_THRESHOLD_SECONDS / 3600, asset_class
-            ),
-        })
-        state.alerted_webhook_silence[asset_class] = True
+        for symbol in symbols:
+            last = state.last_webhook_at.get(symbol)
+            if last is None:
+                continue  # no /webhook hit for this symbol yet this run -- nothing to compare against
+            silent_for = now - last
+            if silent_for < WEBHOOK_SILENCE_THRESHOLD_SECONDS:
+                state.alerted_webhook_silence[symbol] = False
+                continue
+            if state.alerted_webhook_silence.get(symbol):
+                continue
+            _post_to_discord(
+                "\U0001F507 No {} webhook activity for {:.1f} hours".format(symbol, silent_for / 3600),
+                "No /webhook calls for {} have landed in over {:.0f} hours while the {} market "
+                "is open -- check that TradingView alerts are still firing and reaching this "
+                "server. Other symbols' feeds (even in the same asset class) don't reset this "
+                "clock.".format(symbol, WEBHOOK_SILENCE_THRESHOLD_SECONDS / 3600, asset_class),
+            )
+            _trigger_github_dispatch("webhook-silence", {
+                "symbol": symbol,
+                "asset_class": asset_class,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "silent_for_hours": round(silent_for / 3600, 2),
+                "last_webhook_at": datetime.fromtimestamp(last, tz=timezone.utc).isoformat(),
+                "detail": "No /webhook calls for {} received in over {:.0f} hours during {} market hours.".format(
+                    symbol, WEBHOOK_SILENCE_THRESHOLD_SECONDS / 3600, asset_class
+                ),
+            })
+            state.alerted_webhook_silence[symbol] = True
 
 
 def check_and_alert_broker_errors():

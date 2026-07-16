@@ -45,23 +45,24 @@ current_day = None  # used to detect day rollover and reset daily counters
 failed_login_attempts = []
 failed_webhook_attempts = []
 
-# Discord alerting (see alerts.py). last_webhook_at is per asset class
-# (same pattern as trades_today/risk_percent above), set on every
-# /webhook hit carrying a symbol of that class (regardless of whether
-# the call passes auth -- see server.py's webhook() route) so the
-# webhook-silence check can tell "TradingView stopped reaching us"
-# apart from "TradingView's been quiet because there's nothing to
-# signal on right now". Per-class, not one shared timestamp, because a
-# busy stock feed resetting a single global clock used to completely
-# mask forex or crypto going silent at the same time -- each class's
-# clock only moves when ITS OWN symbols arrive. broker_error_timestamps
-# is a rolling log of recent broker errors, same pattern as
-# failed_login_attempts/failed_webhook_attempts above.
+# Discord alerting (see alerts.py). last_webhook_at is per SYMBOL (keyed
+# by the exact symbol string in a webhook payload, e.g. 'AAPL',
+# 'EUR_USD', 'BTC/USD'), set on every /webhook hit carrying that symbol
+# (regardless of whether the call passes auth -- see server.py's
+# webhook() route) so the webhook-silence check can tell "TradingView
+# stopped reaching us" apart from "TradingView's been quiet because
+# there's nothing to signal on right now". Per-symbol, not per-asset-
+# class: a per-class clock used to let one busy symbol (e.g. NVDA firing
+# every 30m) reset the shared clock and mask a DIFFERENT symbol in the
+# SAME class (e.g. AAPL) going silent at the same time -- each symbol's
+# clock only moves when THAT symbol's own webhooks arrive.
+# broker_error_timestamps is a rolling log of recent broker errors, same
+# pattern as failed_login_attempts/failed_webhook_attempts above.
 # last_broker_error_detail holds the most recent one's traceback text
 # (see server.py's alerts.record_broker_error(detail=...) call sites),
 # forwarded as context in the repository_dispatch payload that triggers
 # the self-heal GitHub Actions workflow.
-last_webhook_at = {"stock": None, "forex": None, "crypto": None}
+last_webhook_at = {}
 broker_error_timestamps = []
 last_broker_error_detail = None
 
@@ -69,8 +70,9 @@ last_broker_error_detail = None
 # run_alert_checks, every 5 min) doesn't re-send the same Discord alert
 # every cycle a condition stays true -- each flips back to False the
 # moment its condition clears, so the NEXT occurrence alerts again. See
-# alerts.py's check_and_alert_* functions.
+# alerts.py's check_and_alert_* functions. alerted_webhook_silence is
+# per-symbol, same reasoning as last_webhook_at above.
 alerted_account_halted = False
 alerted_trading_halted = {"stock": False, "forex": False, "crypto": False}
-alerted_webhook_silence = {"stock": False, "forex": False, "crypto": False}
+alerted_webhook_silence = {}
 alerted_broker_errors = False

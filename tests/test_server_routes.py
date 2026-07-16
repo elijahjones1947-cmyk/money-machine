@@ -150,22 +150,24 @@ def test_webhook_duplicate_successful_signal_rejected_and_logged(client, monkeyp
     assert calls == ["AAPL"]
 
 
-def test_webhook_stamps_silence_clock_only_for_its_own_asset_class(client):
-    """The webhook-silence clock (state.last_webhook_at) is per asset
-    class: a stock webhook must move ONLY stock's timestamp, so stock
-    activity can't mask forex/crypto going silent (the audit finding).
-    Stamped even on a bad-secret call -- the silence check is about
-    whether that class's alerts are REACHING this endpoint at all."""
+def test_webhook_stamps_silence_clock_only_for_its_own_symbol(client):
+    """The webhook-silence clock (state.last_webhook_at) is per SYMBOL: an
+    AAPL webhook must move ONLY AAPL's timestamp, so AAPL activity can't
+    mask a different symbol -- even one in the same asset class, like
+    NVDA -- going silent (the audit finding). Stamped even on a
+    bad-secret call -- the silence check is about whether that symbol's
+    alerts are REACHING this endpoint at all."""
     import state
 
     resp = client.post("/webhook", json={
         "secret": "wrong", "action": "buy", "symbol": "AAPL",
     })
-    assert resp.status_code == 401  # rejected -- but the class's clock still moves
+    assert resp.status_code == 401  # rejected -- but the symbol's clock still moves
 
-    assert state.last_webhook_at["stock"] is not None
-    assert state.last_webhook_at["forex"] is None
-    assert state.last_webhook_at["crypto"] is None
+    assert state.last_webhook_at["AAPL"] is not None
+    assert state.last_webhook_at.get("NVDA") is None
+    assert state.last_webhook_at.get("EUR_USD") is None
+    assert state.last_webhook_at.get("BTC/USD") is None
 
 
 def test_webhook_ip_allowlist_enforce_rejects_unlisted_ip(client, monkeypatch):
