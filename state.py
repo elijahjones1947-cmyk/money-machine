@@ -76,3 +76,15 @@ alerted_account_halted = False
 alerted_trading_halted = {"stock": False, "forex": False, "crypto": False}
 alerted_webhook_silence = {}
 alerted_broker_errors = False
+
+# check_and_alert_webhook_silence's session-boundary anchor (see alerts.py):
+# market_was_open records whether each asset class's market was open the
+# last time the check ran (a missing key -- as opposed to False -- means
+# "never checked yet this process", so a cold start mid-session doesn't
+# look like a fresh open). market_session_start is the timestamp of the
+# most recently observed closed -> open transition per asset class, used
+# to anchor the silence clock to the CURRENT session instead of counting
+# an entire market-closed stretch (overnight, weekend) as unexplained
+# webhook silence.
+market_was_open = {}
+market_session_start = {}
