@@ -8,10 +8,17 @@ last_signal_time = {}
 trade_log = []  # each entry now includes an 'asset_class' field
 equity_history = {"times": [], "values": []}  # combined equity, both brokers
 
+# Scoped down to 2 symbols per asset class (from 4/4/3) -- a deliberate
+# product decision to concentrate live trading rather than spread thin
+# across a wide, mostly-idle watchlist. Dropped: MSFT, NVDA, SPY (stock),
+# EUR_USD, GBP_USD (forex), SOL/USD (crypto). See server.py's
+# _process_trade_signal docstring for how this is actually ENFORCED
+# (removing a symbol from here alone does not stop /webhook from
+# accepting it -- that's a separate server-side gate).
 watched_symbols = {
-    "stock": ["AAPL", "MSFT", "NVDA", "SPY"],
-    "forex": ["EUR_USD", "GBP_USD", "USD_JPY", "GBP_JPY"],
-    "crypto": ["BTC/USD", "ETH/USD", "SOL/USD"],
+    "stock": ["AAPL", "HOOD"],
+    "forex": ["GBP_JPY", "USD_JPY"],
+    "crypto": ["BTC/USD", "ETH/USD"],
 }
 
 bot_enabled = True  # manual global kill switch (overrides all asset classes)

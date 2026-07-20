@@ -905,6 +905,32 @@ def add_watchlist():
     return jsonify({'status': 'exists'})
 
 
+@app.route('/api/watchlist', methods=['DELETE'])
+def remove_watchlist():
+    """Symmetric complement to add_watchlist() above -- doesn't touch any
+    open position or existing strategy assignment for the removed
+    symbol, only the watchlist entry itself. See
+    _process_trade_signal's watchlist gate for what actually happens to
+    a symbol once it's removed from here (new entries rejected unless
+    the bot already holds a position, existing positions keep being
+    monitored/closeable as normal)."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+    data = request.json or {}
+    sym = data.get('symbol', '').upper()
+    asset_class = data.get('asset_class') or asset_class_for_symbol(sym)
+    if asset_class not in ('stock', 'forex', 'crypto'):
+        return jsonify({'error': 'invalid asset_class'}), 400
+    if sym in state.watched_symbols[asset_class]:
+        state.watched_symbols[asset_class].remove(sym)
+        try:
+            db.save_setting('watched_symbols', state.watched_symbols)
+        except Exception as e:
+            logging.warning('Could not persist watched_symbols to DB: {}'.format(e))
+        return jsonify({'status': 'removed'})
+    return jsonify({'status': 'not present'})
+
+
 @app.errorhandler(400)
 @app.errorhandler(415)
 def _handle_webhook_parse_failure(e):
@@ -1575,6 +1601,39 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
     if not state.bot_enabled and not is_manual and not is_forced_close:
         logging.warning('Rejected {} {} {}: bot paused'.format(action, asset_class, symbol))
         return jsonify({'error': 'bot paused'}), 400
+    # Watchlist scope gate: state.watched_symbols is otherwise just a
+    # UI/monitoring construct (regime checks, silence alerts, the
+    # Strategies page) -- webhook() itself never checked it, so dropping
+    # a symbol from the watchlist alone did NOT stop /webhook from
+    # accepting new signals for it (only actually deleting/disabling the
+    # TradingView alert does that, and that's a manual step on Eli's
+    # side, not guaranteed to happen at the exact same moment as this
+    # deploy). This closes that gap server-side: a symbol that's been
+    # scoped OUT of the watchlist can no longer open a brand-new
+    # position. It's checked against the bot's REAL current holdings,
+    # not just "is it in the list", so a symbol the bot already holds
+    # (from before it was dropped) keeps receiving signals normally --
+    # letting it exit naturally via its own strategy's exit alert or the
+    # safety net, instead of getting silently stranded open forever.
+    # Manual dashboard trades and forced closes are exempt, same as the
+    # bot_enabled check above -- an operator explicitly acting, or an
+    # emergency/administrative close, must never be blocked by this.
+    #
+    # NOTE: this does allow an already-held dropped symbol to accept a
+    # same-direction ADD (not just a close) until its alert is actually
+    # disabled -- accepted tradeoff given how small a window that is and
+    # how small these positions are; not worth the complexity of
+    # distinguishing add-vs-reduce per asset class here (forex in
+    # particular has no existing notion of it outside a forced close).
+    if not is_manual and not is_forced_close and symbol not in state.watched_symbols.get(asset_class, []):
+        already_held = any(p['symbol'] == symbol for p in get_all_positions())
+        if not already_held:
+            logging.warning(
+                'Rejected {} {} {}: not on the watchlist and the bot holds no position in it'.format(
+                    action, asset_class, symbol
+                )
+            )
+            return jsonify({'error': '{} is not currently watched'.format(symbol)}), 400
     if state.trades_today[asset_class] >= state.max_trades_per_day[asset_class] and not is_manual and not is_forced_close:
         logging.warning('Rejected {} {} {}: max trades/day reached ({})'.format(action, asset_class, symbol, state.max_trades_per_day[asset_class]))
         return jsonify({'error': 'max {} trades reached for today'.format(asset_class)}), 400

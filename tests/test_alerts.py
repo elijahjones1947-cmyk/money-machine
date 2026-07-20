@@ -37,12 +37,23 @@ def clean_alert_state():
     state.broker_error_timestamps = []
     state.last_webhook_at = {}
     state.last_broker_error_detail = None
+    # Saved/restored, not just overwritten -- this fixture used to leave
+    # its pinned value behind permanently (no teardown), which was
+    # invisible only because it happened to match state.py's own default
+    # at the time. Once that default changed (Step 4: scoped down to 2
+    # symbols/class), the leak became real: test_server_routes.py's
+    # session-scoped state snapshot (conftest.py's app_module fixture)
+    # is captured lazily on first use, so if it ran AFTER this file (as
+    # it does, alphabetically) it would silently snapshot THIS fixture's
+    # leftover value instead of state.py's true default.
+    original_watched_symbols = state.watched_symbols
     state.watched_symbols = {
         "stock": ["AAPL", "MSFT", "NVDA", "SPY"],
         "forex": ["EUR_USD", "GBP_USD", "USD_JPY", "GBP_JPY"],
         "crypto": ["BTC/USD", "ETH/USD", "SOL/USD"],
     }
     yield
+    state.watched_symbols = original_watched_symbols
 
 
 class FakeRiskManager:

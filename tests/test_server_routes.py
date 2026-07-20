@@ -7,8 +7,10 @@ methods, not mocks of db.py's/server.py's own functions).
 Covers: /api/dashboard, /api/login (valid/invalid password, failed-attempt
 tracking), /webhook (valid secret, invalid secret, WEBHOOK_IP_MODE
 allowlist behavior, dedup-stamp rollback on failed attempts, duplicate
-drop of a genuinely successful signal), /api/settings (risk_caps
-persistence), and /api/backtest (live_performance present).
+drop of a genuinely successful signal, the watchlist scope gate),
+/api/settings (risk_caps persistence), /api/manual_trade,
+/api/manual_close, /api/watchlist (add/remove), and /api/backtest
+(live_performance present).
 
 /webhook is now ASYNC: a valid signal gets queued (webhook_queue.py) and
 the route returns 202 immediately, before the actual broker calls run --
@@ -20,14 +22,14 @@ skipping that wait risks two things: a flaky assertion racing the
 worker thread, and worse, leaking a still-running background trade into
 the NEXT test's state reset. See tests/test_webhook_queue.py for
 webhook_queue.py's own ordering/concurrency guarantees in isolation.
+/api/manual_trade and /api/manual_close are deliberately still
+SYNCHRONOUS (see webhook()'s docstring for why they weren't moved to
+the async queue too), so their tests call them directly with no wait
+needed.
 
-NOT covered: /api/manual_trade, /api/manual_close, /api/watchlist,
-/ui/layout, Hermes's routes -- these share the same
-_process_trade_signal/db plumbing already exercised below (and, for
-manual_trade/manual_close, are deliberately still SYNCHRONOUS -- see
-webhook()'s docstring for why they weren't moved to the async queue
-too) and don't need separate fixture infrastructure, but weren't asked
-for here. Worth adding the same way if this suite grows further.
+NOT covered: /ui/layout, Hermes's routes -- share the same db plumbing
+already exercised below and don't need separate fixture infrastructure,
+but weren't asked for here.
 """
 
 import json
@@ -1022,16 +1024,16 @@ def test_recover_pending_webhook_signals_resumes_leftover_pending_rows(client, d
         "status": "pending", "received_at": None, "completed_at": None, "error_message": None,
     })
     db_store["webhook_signals"].append({
-        "id": 102, "symbol": "MSFT", "action": "buy", "manual_flag": False,
+        "id": 102, "symbol": "HOOD", "action": "buy", "manual_flag": False,
         "status": "pending", "received_at": None, "completed_at": None, "error_message": None,
     })
 
     server.recover_pending_webhook_signals()
     webhook_queue.wait_for_idle("AAPL")
-    webhook_queue.wait_for_idle("MSFT")
+    webhook_queue.wait_for_idle("HOOD")
 
     assert ("AAPL", "buy") in execution_order
-    assert ("MSFT", "buy") in execution_order
+    assert ("HOOD", "buy") in execution_order
 
     statuses = {row["id"]: row["status"] for row in db_store["webhook_signals"]}
     assert statuses[101] == "done"
@@ -1125,3 +1127,132 @@ def test_backtest_response_includes_live_performance_key(auth_client):
     assert "live_performance" in body
     # state.trade_log is empty (reset_state), so this is the no-closed-trades shape.
     assert body["live_performance"]["trade_count"] == 0
+
+
+# --- Watchlist scope gate (Step 4: limiting live trading to 2 symbols
+# per asset class) --------------------------------------------------
+
+def test_webhook_rejects_new_entry_for_symbol_not_on_watchlist(client, caplog):
+    """MSFT was dropped from the default watchlist (state.py) -- a
+    webhook signal for it, with the bot holding no position, must be
+    rejected outright rather than silently opening a new position the
+    watchlist no longer includes. /webhook always responds 202
+    immediately regardless of outcome (see webhook()'s docstring) -- the
+    actual rejection happens in the background, observable via
+    trade_log staying empty and the logged warning."""
+    import state
+
+    with caplog.at_level(logging.WARNING):
+        resp = _post_webhook_and_wait(client, {
+            "secret": "test-webhook-secret", "action": "buy", "symbol": "MSFT",
+        })
+    assert resp.status_code == 202
+    assert state.trade_log == []
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("not on the watchlist" in m and "MSFT" in m for m in messages)
+
+
+def test_webhook_allows_signal_for_dropped_symbol_the_bot_still_holds(client, monkeypatch):
+    """A symbol dropped from the watchlist that the bot ALREADY holds a
+    position in (e.g. from before it was dropped) must keep receiving
+    signals normally -- otherwise it would be silently stranded open
+    forever with no way to exit via its own strategy's exit alert."""
+    import server
+    import state
+
+    fake_position = SimpleNamespace(
+        symbol="MSFT", asset_class="us_equity", qty="25", qty_available="25",
+        avg_entry_price="399.09", current_price="399.83", unrealized_pl="18.45",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "sell", "symbol": "MSFT",
+    })
+    assert resp.status_code == 202
+    last_trade = state.trade_log[-1]
+    assert last_trade["symbol"] == "MSFT"
+    assert last_trade["action"] == "sell"
+
+
+def test_webhook_watchlist_gate_does_not_apply_to_still_watched_symbols(client):
+    """Sanity check: the gate must not accidentally start rejecting
+    signals for symbols that ARE still on the watchlist (AAPL)."""
+    import state
+
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+    assert resp.status_code == 202
+    assert state.trade_log[-1]["symbol"] == "AAPL"
+
+
+def test_manual_trade_bypasses_watchlist_gate(auth_client):
+    """An operator explicitly using the dashboard's manual buy/sell
+    buttons must never be blocked by the watchlist scope -- same
+    exemption bot_enabled/max_trades_per_day already get for is_manual."""
+    import state
+
+    resp = auth_client.post("/api/manual_trade", json={"action": "buy", "symbol": "MSFT"})
+    assert resp.status_code == 200
+    assert state.trade_log[-1]["symbol"] == "MSFT"
+    assert state.trade_log[-1]["source"] == "manual"
+
+
+def test_safety_net_force_close_bypasses_watchlist_gate(app_module, reset_state, monkeypatch):
+    """The safety net force-closing a losing position must never be
+    blocked by the watchlist scope, even for a symbol that's since been
+    dropped -- an emergency exit must always be allowed through."""
+    import server
+    import state
+
+    # cost_basis = 25 * 400 = 10000; loss of 400 -> 4%, past the 2% paper
+    # stock safety_stop_loss_pct threshold (config.py).
+    fake_position = SimpleNamespace(
+        symbol="MSFT", asset_class="us_equity", qty="25",
+        avg_entry_price="400.0", current_price="384.0", unrealized_pl="-400.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    server.run_position_safety_checks()
+
+    last_trade = state.trade_log[-1]
+    assert last_trade["symbol"] == "MSFT"
+    assert last_trade["action"] == "sell"
+    assert last_trade["source"] == "safety_stop_loss"
+
+
+def test_remove_watchlist_requires_auth(client):
+    resp = client.delete("/api/watchlist", json={"symbol": "MSFT"})
+    assert resp.status_code == 401
+
+
+def test_add_then_remove_watchlist_round_trip(auth_client):
+    import state
+
+    assert "TSLA" not in state.watched_symbols["stock"]
+    add_resp = auth_client.post("/api/watchlist", json={"symbol": "TSLA", "asset_class": "stock"})
+    assert add_resp.status_code == 200
+    assert add_resp.get_json() == {"status": "added"}
+    assert "TSLA" in state.watched_symbols["stock"]
+
+    remove_resp = auth_client.delete("/api/watchlist", json={"symbol": "TSLA", "asset_class": "stock"})
+    assert remove_resp.status_code == 200
+    assert remove_resp.get_json() == {"status": "removed"}
+    assert "TSLA" not in state.watched_symbols["stock"]
+
+
+def test_remove_watchlist_symbol_not_present_is_a_no_op(auth_client):
+    resp = auth_client.delete("/api/watchlist", json={"symbol": "ZZZZ", "asset_class": "stock"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "not present"}
+
+
+def test_remove_watchlist_infers_asset_class_when_omitted(auth_client):
+    import state
+
+    assert "BTC/USD" in state.watched_symbols["crypto"]
+    resp = auth_client.delete("/api/watchlist", json={"symbol": "BTC/USD"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "removed"}
+    assert "BTC/USD" not in state.watched_symbols["crypto"]
