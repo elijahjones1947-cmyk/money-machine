@@ -68,6 +68,92 @@ def test_max_open_positions_rejects_new_buys(risk_manager):
     assert "max open positions" in reason.lower()
 
 
+# --- Dust exclusion from max_open_positions (open_position_values) ------
+#
+# The real incident this covers: BTC/USD, ETH/USD, and SOL/USD each sat
+# at a sub-cent leftover balance (rounding artifacts from imprecise
+# fills/closes, e.g. 1.55e-07 BTC/USD ~= $0.01) -- economically
+# meaningless, but each still counted as a full "open position" against
+# crypto's max_open_positions=3 cap, permanently maxing it out and
+# silently blocking every new crypto entry for days despite the account
+# holding no REAL crypto exposure at all. risk_manager's fixture above
+# uses the constructor's default $5 dust threshold (not passed
+# explicitly), matching config.py's real DUST_POSITION_VALUE_USD.
+
+def test_dust_positions_do_not_count_against_the_cap(risk_manager):
+    """3 positions, all worth well under $5 (pure rounding dust) --
+    crypto's cap is 3, but none of these should occupy a slot, so a new
+    entry must still be approved."""
+    dust_values = [0.01, 0.0017, 0.00004]
+    approved, reason = risk_manager.check_trade(
+        FakeBroker(), "BTC/USD", "buy", 1, "crypto", price=100.0,
+        open_position_values=dust_values,
+    )
+    assert approved, reason
+
+
+def test_real_positions_still_correctly_blocked_at_the_cap(risk_manager):
+    """Same cap (3), but these are REAL positions (well over $5) -- must
+    still be rejected exactly as before. Proves the dust exclusion
+    didn't quietly loosen the cap for genuine exposure."""
+    real_values = [500.0, 1200.0, 80.0]
+    approved, reason = risk_manager.check_trade(
+        FakeBroker(), "BTC/USD", "buy", 1, "crypto", price=100.0,
+        open_position_values=real_values,
+    )
+    assert not approved
+    assert "max open positions" in reason.lower()
+
+
+def test_mix_of_dust_and_real_positions_only_real_ones_count(risk_manager):
+    """2 dust + 2 real, cap is 3 -- only the 2 real ones count (2 < 3),
+    so this must be approved even though the RAW count (4) would exceed
+    the cap under the old len()-only logic."""
+    mixed_values = [0.01, 0.02, 500.0, 80.0]
+    approved, reason = risk_manager.check_trade(
+        FakeBroker(), "BTC/USD", "buy", 1, "crypto", price=100.0,
+        open_position_values=mixed_values,
+    )
+    assert approved, reason
+
+    # One more real position pushes the REAL count to 3 -- now correctly blocked.
+    mixed_values_at_cap = [0.01, 0.02, 500.0, 80.0, 90.0]
+    approved, reason = risk_manager.check_trade(
+        FakeBroker(), "BTC/USD", "buy", 1, "crypto", price=100.0,
+        open_position_values=mixed_values_at_cap,
+    )
+    assert not approved
+    assert "max open positions" in reason.lower()
+
+
+def test_dust_threshold_is_a_boundary_not_strictly_less_than():
+    """A position worth EXACTLY the threshold counts as real, not dust --
+    the check_trade filter is `>=`, matching config.DUST_POSITION_VALUE_USD's
+    own docstring ('less than this many dollars' is dust)."""
+    rm = RiskManager(
+        {"crypto": {"max_position_size_pct": 0.03, "max_daily_loss_pct": 0.02, "max_open_positions": 1},
+         "account_wide": {"max_daily_loss_pct": 0.08}},
+        dust_position_value_usd=5.0,
+    )
+    rm.set_starting_equity(10000.0)
+    approved, reason = rm.check_trade(
+        FakeBroker(), "BTC/USD", "buy", 1, "crypto", price=100.0,
+        open_position_values=[5.0],  # exactly the threshold -- counts as real
+    )
+    assert not approved
+    assert "max open positions" in reason.lower()
+
+
+def test_open_position_values_omitted_falls_back_to_broker_get_positions(risk_manager):
+    """No open_position_values passed at all -- must behave exactly like
+    before this feature existed (plain len(broker.get_positions())),
+    for any caller that doesn't have a normalized position list handy."""
+    broker = FakeBroker(positions=[object()] * 3)  # crypto cap is 3
+    approved, reason = risk_manager.check_trade(broker, "BTC/USD", "buy", 1, "crypto", price=100.0)
+    assert not approved
+    assert "max open positions" in reason.lower()
+
+
 def test_leverage_cap_rejects_when_it_is_the_binding_constraint():
     """Uses a config where max_leverage is deliberately the tighter
     constraint (2x) relative to max_position_size_pct (300%), so

@@ -12,7 +12,7 @@ class RiskManager:
     adding a new bucket to RISK_CONFIG — nothing here needs to change.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, dust_position_value_usd=5.0):
         # config = {
         #   "stock": {"max_position_size_pct": .., "max_daily_loss_pct": .., "max_open_positions": ..},
         #   "forex": {"max_position_size_pct": .., "max_daily_loss_pct": .., "max_open_positions": .., "max_leverage": ..},
@@ -25,12 +25,18 @@ class RiskManager:
         self.trading_halted = {k: False for k in self.asset_classes}
         self.account_halted = False
         self.starting_equity_today = None
+        # See check_trade's open_position_values param -- passed in here
+        # (not imported from config.py directly) to keep this class
+        # broker/config-module-agnostic, same reasoning as `config` above
+        # being injected rather than imported.
+        self.dust_position_value_usd = dust_position_value_usd
 
     def set_starting_equity(self, total_equity):
         """Call once per day (e.g. on first trade or a daily reset job)."""
         self.starting_equity_today = total_equity
 
-    def check_trade(self, broker, symbol, side, size, asset_class, price=None, reduces_position=False):
+    def check_trade(self, broker, symbol, side, size, asset_class, price=None, reduces_position=False,
+                     open_position_values=None):
         """Returns (approved: bool, reason: str).
 
         `price` should be the SAME price snapshot the caller used to size
@@ -54,6 +60,20 @@ class RiskManager:
         oversight -- see the position safety-net monitor in server.py,
         which depends on this to be able to force-close a position even
         when trading is halted.
+
+        `open_position_values`, when given, is the list of notional USD
+        values (one per currently open position in THIS asset class) --
+        used ONLY for the max_open_positions count below, so a position
+        worth less than dust_position_value_usd (a rounding leftover
+        from an imprecise fill/close, not real capital at risk) never
+        occupies a cap "slot". This class deliberately doesn't know how
+        to compute a position's value itself (that requires broker-
+        specific field parsing -- see server.py's get_all_positions(),
+        which is what actually builds this list), so it stays
+        broker-agnostic exactly like `config` above. Omit it (the
+        default) to fall back to the plain broker.get_positions() count
+        -- unchanged behavior for any caller that doesn't have a
+        normalized position list handy.
         """
         if reduces_position:
             return True, "OK (reduces/closes existing position -- risk checks don't apply)"
@@ -81,9 +101,14 @@ class RiskManager:
         if position_value > max_allowed:
             return False, "Position too big: ${:.2f} > max ${:.2f}".format(position_value, max_allowed)
 
-        # max open positions
-        current_positions = broker.get_positions()
-        if len(current_positions) >= rules["max_open_positions"]:
+        # max open positions -- dust excluded from the count (see
+        # open_position_values's docstring above), everything else
+        # unchanged.
+        if open_position_values is not None:
+            open_position_count = sum(1 for v in open_position_values if v >= self.dust_position_value_usd)
+        else:
+            open_position_count = len(broker.get_positions())
+        if open_position_count >= rules["max_open_positions"]:
             return False, "Max open positions reached for {}".format(asset_class)
 
         # leverage check (mainly relevant for forex; crypto/stock configs

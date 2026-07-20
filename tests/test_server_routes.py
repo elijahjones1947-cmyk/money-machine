@@ -1256,3 +1256,64 @@ def test_remove_watchlist_infers_asset_class_when_omitted(auth_client):
     assert resp.status_code == 200
     assert resp.get_json() == {"status": "removed"}
     assert "BTC/USD" not in state.watched_symbols["crypto"]
+
+
+# --- Dust positions excluded from max_open_positions (wiring, not just
+# risk_manager.py's own unit tests -- see tests/test_risk_manager.py for
+# the isolated dust-filtering logic) -----------------------------------
+
+def test_dust_crypto_positions_do_not_block_a_new_entry_via_webhook(client, monkeypatch):
+    """The real incident: BTC/USD, ETH/USD, SOL/USD each sat at a
+    sub-cent leftover balance (rounding artifacts, not real capital),
+    but each still counted as a full 'open position' against crypto's
+    max_open_positions=3 cap -- permanently maxing it out and silently
+    blocking every new crypto entry for days. _process_trade_signal must
+    actually compute per-asset-class open_position_values from
+    get_all_positions() and pass them through so dust like this is
+    excluded from the count."""
+    import server
+    import state
+
+    dust_positions = [
+        SimpleNamespace(symbol="BTCUSD", asset_class="crypto", qty="0.00000015",
+                         avg_entry_price="65226.83", current_price="65402.30", unrealized_pl="0.0"),
+        SimpleNamespace(symbol="ETHUSD", asset_class="crypto", qty="0.0000009",
+                         avg_entry_price="1930.66", current_price="1896.12", unrealized_pl="0.0"),
+        SimpleNamespace(symbol="SOLUSD", asset_class="crypto", qty="0.000000545",
+                         avg_entry_price="78.32", current_price="77.74", unrealized_pl="0.0"),
+    ]
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: dust_positions)
+
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "BTC/USD",
+    })
+
+    assert resp.status_code == 202
+    assert state.trade_log[-1]["symbol"] == "BTC/USD"
+    assert state.trade_log[-1]["action"] == "buy"
+
+
+def test_real_crypto_positions_still_block_a_new_entry_via_webhook(client, monkeypatch, caplog):
+    """Same cap (3), same wiring, but REAL-sized positions -- must still
+    be correctly rejected. Proves the dust exclusion didn't quietly
+    loosen the cap for genuine exposure."""
+    import server
+
+    real_positions = [
+        SimpleNamespace(symbol="BTCUSD", asset_class="crypto", qty="0.05",
+                         avg_entry_price="65226.83", current_price="65402.30", unrealized_pl="10.0"),
+        SimpleNamespace(symbol="ETHUSD", asset_class="crypto", qty="1.0",
+                         avg_entry_price="1930.66", current_price="1896.12", unrealized_pl="-30.0"),
+        SimpleNamespace(symbol="SOLUSD", asset_class="crypto", qty="10.0",
+                         avg_entry_price="78.32", current_price="77.74", unrealized_pl="-6.0"),
+    ]
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: real_positions)
+
+    with caplog.at_level(logging.WARNING):
+        resp = _post_webhook_and_wait(client, {
+            "secret": "test-webhook-secret", "action": "buy", "symbol": "BTC/USD",
+        })
+
+    assert resp.status_code == 202  # queued regardless -- rejection happens in the background, see webhook()'s docstring
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("Max open positions reached for crypto" in m for m in messages)

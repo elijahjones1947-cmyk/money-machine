@@ -137,6 +137,21 @@ RISK_CONFIG = {
 }
 
 
+# A position worth less than this many dollars doesn't count against
+# max_open_positions (risk/risk_manager.py's check_trade). Purely a
+# rounding leftover from an imprecise fill/close (e.g. 1.55e-07 BTC/USD,
+# cost basis $0.01) is not real capital at risk, but until this existed
+# it still occupied a full "slot" in the cap -- 3 such leftovers across
+# BTC/USD, ETH/USD, and SOL/USD silently blocked every new crypto entry
+# for days (max_open_positions=3) despite the account being nowhere
+# near actually at capacity. One flat threshold regardless of asset
+# class or trading mode -- a $0.01 position is equally negligible
+# whether it's stock, forex, or crypto, paper or live. Tune here if it
+# ever needs to move; doesn't affect visibility (dashboard/trade log
+# still show these positions exactly as before) -- only the cap count.
+DUST_POSITION_VALUE_USD = 5.0
+
+
 def get_broker_credentials(broker_name):
     """broker_name = 'alpaca' or 'oanda'"""
     creds = BROKER_CONFIG[broker_name][TRADING_MODE]

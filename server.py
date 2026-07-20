@@ -90,7 +90,7 @@ BROKERS = {"stock": alpaca_broker, "forex": oanda_broker, "crypto": alpaca_broke
 # numbers that can silently drift apart. See risk/risk_manager.py and
 # the Settings API route for the other half of this.
 state.risk_caps = copy.deepcopy(config.get_risk_config())
-risk_manager = RiskManager(state.risk_caps)
+risk_manager = RiskManager(state.risk_caps, dust_position_value_usd=config.DUST_POSITION_VALUE_USD)
 
 # Hermes stays disabled (its routes return 503) if ANTHROPIC_API_KEY is
 # not set -- see hermes.py's init_hermes().
@@ -1740,8 +1740,26 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
                 logging.warning('Rejected {} forex {}: position too small (risk_amount={:.2f}, price={:.2f})'.format(action, symbol, risk_amount, price))
                 return jsonify({'error': 'position too small'}), 400
 
+        # Dust positions (rounding leftovers from an imprecise fill/close,
+        # not real capital at risk -- see config.DUST_POSITION_VALUE_USD)
+        # must not permanently occupy a max_open_positions "slot": this
+        # silently blocked every new crypto entry for days once BTC/USD,
+        # ETH/USD, and SOL/USD all sat at sub-cent leftover balances.
+        # get_all_positions() already normalizes both brokers' shapes
+        # (risk_manager.py deliberately doesn't know how); 'avg_entry' is
+        # the same cost-basis field run_position_safety_checks() uses.
+        # Skipped entirely for reduces_position trades -- check_trade
+        # bypasses the max_open_positions check for those anyway (see
+        # its own docstring), so computing this would just be an unused
+        # broker round-trip.
+        open_position_values = None
+        if not reduces_position:
+            open_position_values = [
+                p['qty'] * p['avg_entry'] for p in get_all_positions() if p['asset_class'] == asset_class
+            ]
         approved, reason = risk_manager.check_trade(
             broker, symbol, action, size, asset_class, price=price, reduces_position=reduces_position,
+            open_position_values=open_position_values,
         )
         if not approved:
             logging.warning('Rejected {} {} {}: {}'.format(action, asset_class, symbol, reason))
