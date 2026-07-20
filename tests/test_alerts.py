@@ -37,6 +37,8 @@ def clean_alert_state():
     state.broker_error_timestamps = []
     state.last_webhook_at = {}
     state.last_broker_error_detail = None
+    state.market_was_open = {}
+    state.market_session_start = {}
     state.watched_symbols = {
         "stock": ["AAPL", "MSFT", "NVDA", "SPY"],
         "forex": ["EUR_USD", "GBP_USD", "USD_JPY", "GBP_JPY"],
@@ -361,6 +363,35 @@ def test_webhook_silence_gates_each_class_by_its_own_market_hours(monkeypatch):
 
     assert state.alerted_webhook_silence["BTC/USD"] is True
     assert state.alerted_webhook_silence.get("AAPL") is None  # its market is closed -- not checked
+
+
+def test_webhook_silence_does_not_alert_immediately_after_market_reopens(monkeypatch):
+    """Regression test for the false positive that triggered this fix: a
+    symbol's last webhook lands well before the previous close, the market
+    then closes overnight, and the very first check after it reopens used
+    to see `now - last` already past threshold -- the entire overnight
+    closure counted as 'silence' -- and fire immediately, even though the
+    new session had barely started and nothing is actually wrong."""
+    state.last_webhook_at["MSFT"] = time.time() - 10 * 3600  # last webhook 10h ago
+
+    monkeypatch.setattr(alerts, "_is_market_hours", lambda asset_class, now_utc=None: False)
+    alerts.check_and_alert_webhook_silence()  # market closed -- no check performed
+    assert state.alerted_webhook_silence.get("MSFT") is None
+
+    monkeypatch.setattr(alerts, "_is_market_hours", lambda asset_class, now_utc=None: True)
+    alerts.check_and_alert_webhook_silence()  # market just reopened
+    assert state.alerted_webhook_silence.get("MSFT") is False  # must not alert right at reopen
+
+
+def test_webhook_silence_still_alerts_for_genuine_intra_session_silence(monkeypatch):
+    """The session-boundary fix must not swallow a real case: silence that
+    persists well past the threshold within a single continuous session
+    (no market close in between) still alerts."""
+    _all_markets_open(monkeypatch)
+    state.last_webhook_at["MSFT"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 1
+    alerts.check_and_alert_webhook_silence()
+    alerts.check_and_alert_webhook_silence()  # market stayed open the whole time -- no reset
+    assert state.alerted_webhook_silence["MSFT"] is True
 
 
 def test_webhook_silence_latch_clears_when_symbol_goes_fresh_again(monkeypatch):

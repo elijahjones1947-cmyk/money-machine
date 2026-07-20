@@ -232,16 +232,37 @@ def check_and_alert_webhook_silence():
     busy symbol (e.g. NVDA firing every 30m) used to reset a single shared
     per-class clock and mask a DIFFERENT symbol in the SAME class (e.g.
     AAPL) going silent at the same time. Latching is per-symbol too, same
-    shape as alerted_trading_halted."""
+    shape as alerted_trading_halted.
+
+    The silence clock is anchored to state.market_session_start, not to
+    the raw last-webhook timestamp -- see the comment below for why."""
     now = time.time()
     for asset_class, symbols in state.watched_symbols.items():
         if not _is_market_hours(asset_class):
+            state.market_was_open[asset_class] = False
             continue
+
+        # Anchor the silence clock to when this asset class's market most
+        # recently reopened, not just to whether it's open right now.
+        # Without this, `now - last` still spans however long the market
+        # was CLOSED in between (overnight for stock, the weekend for
+        # forex) -- exactly the "silence" _is_market_hours is here to rule
+        # out, per its own docstring -- so the very first check after every
+        # single market open would find silent_for already past threshold
+        # and fire a guaranteed false alarm. `market_was_open.get(asset_class)`
+        # is a missing key (not False) on the first check after a process
+        # start, so a cold start mid-session doesn't spuriously reset the
+        # clock -- only an actually-observed closed -> open transition does.
+        if state.market_was_open.get(asset_class) is False:
+            state.market_session_start[asset_class] = now
+        state.market_was_open[asset_class] = True
+
         for symbol in symbols:
             last = state.last_webhook_at.get(symbol)
             if last is None:
                 continue  # no /webhook hit for this symbol yet this run -- nothing to compare against
-            silent_for = now - last
+            session_start = state.market_session_start.get(asset_class, 0)
+            silent_for = now - max(last, session_start)
             if silent_for < WEBHOOK_SILENCE_THRESHOLD_SECONDS:
                 state.alerted_webhook_silence[symbol] = False
                 continue
