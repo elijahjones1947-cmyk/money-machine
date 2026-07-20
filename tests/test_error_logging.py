@@ -40,7 +40,14 @@ def test_db_log_handler_writes_warning_level_logs_to_error_log(client, db_store)
 def test_db_log_handler_does_not_write_info_level_logs(client, db_store):
     """/webhook logs an INFO-level 'Webhook received' line on every hit
     -- that should never reach error_log (handler is WARNING+ only)."""
+    import webhook_queue
+
     client.post("/webhook", json={"secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL"})
+    # /webhook now queues the actual trade in the background (see
+    # server.py's webhook() docstring) -- wait for it to finish before
+    # this test returns, or it can still be running when the next
+    # test's state-reset fixture fires.
+    webhook_queue.wait_for_idle("AAPL")
     assert not any("Webhook received" in e["message"] for e in db_store["errors"])
 
 

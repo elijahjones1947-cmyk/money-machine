@@ -134,6 +134,32 @@ def init_schema():
                     message TEXT NOT NULL
                 );
             """)
+            # The durability layer behind webhook_queue.py: /webhook
+            # writes a row here SYNCHRONOUSLY, before returning 202 --
+            # that write (not the in-memory queue) is what makes an
+            # accepted signal survive a process kill/restart between
+            # "accepted" and "executed". status starts 'pending', moves
+            # to 'processing' right before _process_trade_signal runs,
+            # then 'done' or 'failed' after. See server.py's
+            # recover_pending_webhook_signals() (run at startup) for how
+            # 'pending' rows left over from a crash get resumed, and why
+            # 'processing'/'failed' rows deliberately do NOT get
+            # auto-resumed (can't safely tell whether the broker call
+            # already fired before the crash/error -- retrying blind
+            # risks a DUPLICATE order, which is worse than one signal
+            # needing a human to look at it).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS webhook_signals (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    manual_flag BOOLEAN NOT NULL DEFAULT FALSE,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    completed_at TIMESTAMPTZ,
+                    error_message TEXT
+                );
+            """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_trades_executed_at ON trades (executed_at DESC);
             """)
@@ -142,6 +168,9 @@ def init_schema():
             """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_error_log_occurred_at ON error_log (occurred_at DESC);
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_webhook_signals_status ON webhook_signals (status);
             """)
 
 
@@ -281,5 +310,97 @@ def get_recent_errors(limit=50):
                 LIMIT %s;
                 """,
                 (limit,),
+            )
+            return cur.fetchall()
+
+
+# --- Webhook signal durability (see init_schema's webhook_signals comment
+# and server.py's webhook()/webhook_queue.py for the full picture) --------
+
+def enqueue_webhook_signal(symbol, action, manual_flag):
+    """The actual durability guarantee: called SYNCHRONOUSLY from
+    /webhook before it returns 202, so a signal is durably recorded in
+    Postgres before TradingView is ever told it was accepted. Must stay
+    fast -- a single INSERT, same cost class as save_trade -- or this
+    reintroduces the exact latency problem webhook_queue.py exists to
+    avoid."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO webhook_signals (symbol, action, manual_flag)
+                VALUES (%s, %s, %s)
+                RETURNING id;
+                """,
+                (symbol, action, manual_flag),
+            )
+            return cur.fetchone()[0]
+
+
+def mark_webhook_signal_processing(signal_id):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE webhook_signals SET status = 'processing' WHERE id = %s;",
+                (signal_id,),
+            )
+
+
+def mark_webhook_signal_done(signal_id):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE webhook_signals SET status = 'done', completed_at = now() WHERE id = %s;",
+                (signal_id,),
+            )
+
+
+def mark_webhook_signal_failed(signal_id, error_message):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE webhook_signals
+                SET status = 'failed', completed_at = now(), error_message = %s
+                WHERE id = %s;
+                """,
+                (error_message[:2000], signal_id),
+            )
+
+
+def get_pending_webhook_signals():
+    """Rows never even started processing before the last shutdown/crash
+    -- the ONLY status it's safe to auto-resume (see
+    server.py's recover_pending_webhook_signals()). Ordered by id (global
+    insertion order), which is what lets the caller re-enqueue them
+    per-symbol and have webhook_queue.py's own FIFO guarantee reproduce
+    the original arrival order within each symbol."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, symbol, action, manual_flag
+                FROM webhook_signals
+                WHERE status = 'pending'
+                ORDER BY id;
+                """
+            )
+            return cur.fetchall()
+
+
+def get_stuck_webhook_signals():
+    """Rows left in 'processing' (crash mid-execution) or 'failed' (an
+    unexpected exception) -- ambiguous whether the broker call already
+    fired, so these are surfaced for manual review rather than ever
+    auto-resumed. See server.py's recover_pending_webhook_signals()."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, symbol, action, status, received_at, error_message
+                FROM webhook_signals
+                WHERE status IN ('processing', 'failed')
+                ORDER BY id;
+                """
             )
             return cur.fetchall()

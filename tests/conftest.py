@@ -136,6 +136,46 @@ def _dispatch(store, sql_upper, params, as_dict):
     if sql_upper.startswith("SELECT OCCURRED_AT, LEVEL, SOURCE, MESSAGE"):
         return [dict(r) for r in store["errors"][:params[0]]]
 
+    if sql_upper.startswith("INSERT INTO WEBHOOK_SIGNALS"):
+        symbol, action, manual_flag = params
+        new_id = len(store["webhook_signals"]) + 1
+        store["webhook_signals"].append({
+            "id": new_id, "symbol": symbol, "action": action, "manual_flag": manual_flag,
+            "status": "pending", "received_at": datetime.now(timezone.utc),
+            "completed_at": None, "error_message": None,
+        })
+        return [(new_id,)]
+
+    if sql_upper.startswith("UPDATE WEBHOOK_SIGNALS SET STATUS = 'PROCESSING'"):
+        (signal_id,) = params
+        for row in store["webhook_signals"]:
+            if row["id"] == signal_id:
+                row["status"] = "processing"
+        return []
+
+    if sql_upper.startswith("UPDATE WEBHOOK_SIGNALS SET STATUS = 'DONE'"):
+        (signal_id,) = params
+        for row in store["webhook_signals"]:
+            if row["id"] == signal_id:
+                row["status"] = "done"
+                row["completed_at"] = datetime.now(timezone.utc)
+        return []
+
+    if sql_upper.startswith("UPDATE WEBHOOK_SIGNALS SET STATUS = 'FAILED'"):
+        error_message, signal_id = params
+        for row in store["webhook_signals"]:
+            if row["id"] == signal_id:
+                row["status"] = "failed"
+                row["completed_at"] = datetime.now(timezone.utc)
+                row["error_message"] = error_message
+        return []
+
+    if sql_upper.startswith("SELECT ID, SYMBOL, ACTION, MANUAL_FLAG"):
+        return [dict(r) for r in store["webhook_signals"] if r["status"] == "pending"]
+
+    if sql_upper.startswith("SELECT ID, SYMBOL, ACTION, STATUS, RECEIVED_AT, ERROR_MESSAGE"):
+        return [dict(r) for r in store["webhook_signals"] if r["status"] in ("processing", "failed")]
+
     raise AssertionError("Fake DB got an unrecognized query: {!r}".format(sql_upper))
 
 
@@ -197,7 +237,7 @@ class _FakePool:
 # Shared in-memory "database" for the whole test session. Cleared before
 # each route test by reset_state() below. Exposed to tests via the
 # db_store fixture for seeding/asserting on persisted data directly.
-_DB_STORE = {"trades": [], "equity_history": [], "settings": {}, "regimes": {}, "errors": []}
+_DB_STORE = {"trades": [], "equity_history": [], "settings": {}, "regimes": {}, "errors": [], "webhook_signals": []}
 
 # Injected before server.py (or anything importing it) ever runs --
 # module-level, not inside a fixture, since a fixture only runs when a

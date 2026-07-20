@@ -6,6 +6,7 @@ import state
 import db
 import regime
 import alerts
+import webhook_queue
 from apscheduler.schedulers.background import BackgroundScheduler
 from errors import InsufficientFundsError, MarketClosedError, InvalidSymbolError, BrokerConnectionError
 from brokers.alpaca_broker import AlpacaBroker
@@ -867,7 +868,32 @@ def _handle_webhook_parse_failure(e):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """External-facing route for TradingView alerts — requires the shared
-    WEBHOOK_SECRET, never exposed to the browser."""
+    WEBHOOK_SECRET, never exposed to the browser.
+
+    Everything below through the validation checks (secret, IP allowlist,
+    missing/placeholder fields) runs synchronously and stays fast -- no
+    broker or DB calls anywhere in that path -- so a malformed or
+    unauthorized call always gets an immediate, definitive answer. Once a
+    signal passes all of that, actually EXECUTING it (sanity check,
+    broker account/price lookups, order placement -- see
+    _process_trade_signal) is hands-off to webhook_queue.enqueue()
+    instead of being awaited here: two real TradingView delivery-timeout
+    incidents traced back to that broker call chain taking long enough
+    (confirmed up to ~2.85s) that TradingView gave up waiting on the
+    response -- even though, in both cases, the trade had ALREADY
+    executed successfully server-side by then. This route now returns
+    202 the moment a signal is queued, meaning "accepted for
+    processing", NOT "trade placed" -- the real outcome (placed,
+    rejected, or errored) is still logged exactly as before by
+    _process_trade_signal itself (and still lands in error_log via
+    DBLogHandler for anything WARNING+), just after this response has
+    already gone out. webhook_queue guarantees per-symbol ordering: a
+    sell landing shortly after a buy for the same symbol is queued
+    behind it and never races it, even though a different symbol's
+    signal runs fully in parallel. /api/manual_trade and /api/manual_close
+    are UNCHANGED (still synchronous) -- their callers are the dashboard
+    itself, actively waiting on the real outcome to render, not an
+    external service with its own delivery timeout."""
     data = request.json
 
     # Log every inbound webhook call regardless of outcome (secret
@@ -933,7 +959,139 @@ def webhook():
         logging.warning('Rejected webhook call: unsubstituted symbol placeholder')
         return jsonify({'error': 'invalid symbol'}), 400
 
-    return _process_trade_signal(action, symbol, data.get('manual', False))
+    manual_flag = data.get('manual', False)
+    try:
+        # THIS is the actual durability guarantee, not the in-memory
+        # queue below -- a row here means the signal survives a process
+        # kill/restart between "accepted" and "executed" (see db.py's
+        # webhook_signals comment and recover_pending_webhook_signals()
+        # below). Must stay fast: one INSERT, same cost class as
+        # save_trade -- everything slow (broker calls) still happens
+        # only in the background.
+        signal_id = db.enqueue_webhook_signal(symbol, action, manual_flag)
+    except Exception as e:
+        # A transient DB outage must never be the reason a real trade
+        # signal gets rejected outright -- same "a DB hiccup never
+        # blocks a real trade" rule this codebase already applies
+        # everywhere else (e.g. save_trade). Falls back to in-memory-only
+        # queuing for just this one signal: durability is degraded for
+        # it specifically, but it still gets processed normally.
+        logging.error(
+            'Could not persist webhook signal for {} {} -- durability degraded for '
+            'THIS signal only, still processing it: {}'.format(action, symbol, e)
+        )
+        signal_id = None
+    webhook_queue.enqueue(
+        symbol, lambda: _process_queued_webhook_signal(signal_id, action, symbol, manual_flag)
+    )
+    return jsonify({'status': 'accepted', 'symbol': symbol, 'action': action}), 202
+
+
+def _process_queued_webhook_signal(signal_id, action, symbol, manual_flag):
+    """Runs _process_trade_signal on webhook_queue's background worker
+    thread for `symbol` -- outside any Flask request context, since
+    webhook() has already returned its response by the time this runs.
+    app.app_context() (not a full request context) is all that's needed:
+    _process_trade_signal only touches `app` indirectly via jsonify(),
+    never `request`/`session` directly -- same minimal-context pattern
+    run_position_safety_checks() already uses to call this same function
+    from ITS OWN background (APScheduler) thread. Its return value
+    (a Flask response object) is discarded here on purpose: nothing is
+    listening for it anymore, and every outcome it could represent
+    (placed, rejected, errored) is already fully captured by
+    _process_trade_signal's own logging before it returns.
+
+    `signal_id` is the webhook_signals row (db.py) backing this signal's
+    durability -- None if the INSERT itself failed (see webhook()
+    above), in which case status tracking below is skipped entirely and
+    this behaves exactly like before the durable-queue feature existed.
+    Marked 'processing' right before the real work starts and 'done'
+    (regardless of the trade's own outcome -- rejected/errored is still
+    a normally-completed signal) or 'failed' (a genuinely unexpected
+    exception, re-raised afterward) after -- see
+    recover_pending_webhook_signals() for why only 'pending' rows are
+    ever safe to auto-resume, and why 'processing'/'failed' are not."""
+    if signal_id is not None:
+        try:
+            db.mark_webhook_signal_processing(signal_id)
+        except Exception as e:
+            logging.warning('Could not mark webhook signal {} as processing: {}'.format(signal_id, e))
+    with app.app_context():
+        try:
+            _process_trade_signal(action, symbol, manual_flag)
+        except Exception:
+            if signal_id is not None:
+                try:
+                    db.mark_webhook_signal_failed(signal_id, traceback.format_exc())
+                except Exception as e:
+                    logging.warning('Could not mark webhook signal {} as failed: {}'.format(signal_id, e))
+            raise  # webhook_queue's own worker loop logs this -- see there
+        else:
+            if signal_id is not None:
+                try:
+                    db.mark_webhook_signal_done(signal_id)
+                except Exception as e:
+                    logging.warning('Could not mark webhook signal {} as done: {}'.format(signal_id, e))
+
+
+def recover_pending_webhook_signals():
+    """Run once at startup (called at module import time, below) --
+    resumes any webhook_signals rows left in 'pending' after a crash or
+    restart cut a signal off between "durably accepted" and "actually
+    executed". Ordered by id (global insertion order) and re-enqueued
+    per symbol in that order, so webhook_queue.py's own per-symbol FIFO
+    guarantee reproduces the original arrival order exactly.
+
+    Deliberately does NOT touch rows left in 'processing' or 'failed':
+    those started executing before the interruption, and there's no safe
+    way to tell from here whether the broker call itself already fired
+    -- blindly re-running risks a DUPLICATE real order, which is worse
+    than one signal needing a human to check the broker/dashboard
+    directly. Those get logged loudly (ERROR, so it lands in error_log)
+    instead, for exactly that manual review.
+
+    Runs synchronously at import time (NOT scheduled as a job) -- this
+    must complete before gunicorn starts accepting new /webhook traffic,
+    or a brand-new signal for a symbol could create that symbol's
+    queue/worker and start running before an OLDER pending signal for
+    the SAME symbol gets re-enqueued here, silently reordering them.
+    """
+    try:
+        stuck = db.get_stuck_webhook_signals()
+    except Exception as e:
+        logging.error('Could not check for stuck webhook signals at startup: {}'.format(e))
+        stuck = []
+    for row in stuck:
+        logging.error(
+            "Webhook signal #{} ({} {}) was left in status={!r} by a previous crash/restart -- "
+            "NOT auto-resumed (can't safely tell if the broker call already fired). "
+            "received_at={}, error_message={!r}. Check the broker/dashboard directly and "
+            "resolve manually.".format(
+                row['id'], row['action'], row['symbol'], row['status'],
+                row['received_at'], row.get('error_message'),
+            )
+        )
+
+    try:
+        pending = db.get_pending_webhook_signals()
+    except Exception as e:
+        logging.error('Could not check for pending webhook signals at startup: {}'.format(e))
+        return
+    for row in pending:
+        logging.warning(
+            'Resuming webhook signal #{} ({} {}) left pending by a previous crash/restart.'.format(
+                row['id'], row['action'], row['symbol'],
+            )
+        )
+        webhook_queue.enqueue(
+            row['symbol'],
+            lambda row=row: _process_queued_webhook_signal(
+                row['id'], row['action'], row['symbol'], row['manual_flag'],
+            ),
+        )
+
+
+recover_pending_webhook_signals()
 
 
 @app.route('/api/manual_trade', methods=['POST'])

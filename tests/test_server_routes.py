@@ -10,19 +10,43 @@ allowlist behavior, dedup-stamp rollback on failed attempts, duplicate
 drop of a genuinely successful signal), /api/settings (risk_caps
 persistence), and /api/backtest (live_performance present).
 
-NOT covered: /api/manual_trade, /api/watchlist, /ui/layout, Hermes's
-routes -- these share the same _process_trade_signal/db plumbing
-already exercised below and don't need separate fixture infrastructure,
-but weren't asked for here. Worth adding the same way if this suite
-grows further.
+/webhook is now ASYNC: a valid signal gets queued (webhook_queue.py) and
+the route returns 202 immediately, before the actual broker calls run --
+see server.py's webhook() docstring for why. Every test below that needs
+to assert on a signal's REAL outcome (not just the immediate 202) uses
+_post_webhook_and_wait(), which posts and then blocks until that
+symbol's background queue has drained (webhook_queue.wait_for_idle) --
+skipping that wait risks two things: a flaky assertion racing the
+worker thread, and worse, leaking a still-running background trade into
+the NEXT test's state reset. See tests/test_webhook_queue.py for
+webhook_queue.py's own ordering/concurrency guarantees in isolation.
+
+NOT covered: /api/manual_trade, /api/manual_close, /api/watchlist,
+/ui/layout, Hermes's routes -- these share the same
+_process_trade_signal/db plumbing already exercised below (and, for
+manual_trade/manual_close, are deliberately still SYNCHRONOUS -- see
+webhook()'s docstring for why they weren't moved to the async queue
+too) and don't need separate fixture infrastructure, but weren't asked
+for here. Worth adding the same way if this suite grows further.
 """
 
 import json
 import logging
+import time
 from types import SimpleNamespace
 
 import config
+import webhook_queue
 from errors import BrokerConnectionError
+
+
+def _post_webhook_and_wait(client, payload, **kwargs):
+    """POSTs to /webhook and blocks until `payload`'s symbol has finished
+    background processing -- see this module's docstring for why tests
+    almost always need to wait rather than trust the immediate 202."""
+    resp = client.post("/webhook", json=payload, **kwargs)
+    webhook_queue.wait_for_idle(payload.get("symbol"))
+    return resp
 
 
 def test_login_valid_password_succeeds(client):
@@ -50,14 +74,21 @@ def test_login_tracks_failed_attempts_and_clears_on_success(client):
 
 
 def test_webhook_valid_secret_places_order(client):
-    resp = client.post("/webhook", json={
+    import state
+
+    resp = _post_webhook_and_wait(client, {
         "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
     })
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body["status"] == "order placed"
-    assert body["symbol"] == "AAPL"
-    assert body["asset_class"] == "stock"
+    # 202 only means "queued for processing", not "trade placed" -- see
+    # webhook()'s docstring. The real outcome is asserted below, after
+    # _post_webhook_and_wait has confirmed the background worker ran it.
+    assert resp.status_code == 202
+    assert resp.get_json() == {"status": "accepted", "symbol": "AAPL", "action": "buy"}
+
+    last_trade = state.trade_log[-1]
+    assert last_trade["action"] == "buy"
+    assert last_trade["symbol"] == "AAPL"
+    assert last_trade["asset_class"] == "stock"
 
 
 def test_webhook_invalid_secret_rejected(client):
@@ -81,7 +112,9 @@ def test_webhook_retry_after_broker_failure_succeeds(client, monkeypatch):
     broker errors on the first try, TradingView's retry of the same alert
     within the window has to actually execute -- the original bug was the
     retry coming back 200 'duplicate ignored' with the signal never traded
-    and nothing in the logs."""
+    and nothing in the logs. Both requests now return 202 regardless of
+    outcome (queued, not synchronous) -- the broker failure and the
+    retry's success are only observable after waiting for each to drain."""
     import server
     import state
 
@@ -96,17 +129,18 @@ def test_webhook_retry_after_broker_failure_succeeds(client, monkeypatch):
     monkeypatch.setattr(server.alpaca_broker, "place_order", flaky_place_order)
 
     payload = {"secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL"}
-    first = client.post("/webhook", json=payload)
-    assert first.status_code == 502
+    first = _post_webhook_and_wait(client, payload)
+    assert first.status_code == 202
 
     # The failed attempt rolled back its dedup stamp...
     assert "AAPL_buy" not in state.last_signal_time
 
     # ...so the retry places a real order instead of 'duplicate ignored'.
-    retry = client.post("/webhook", json=payload)
-    assert retry.status_code == 200
-    assert retry.get_json()["status"] == "order placed"
+    retry = _post_webhook_and_wait(client, payload)
+    assert retry.status_code == 202
     assert len(calls) == 2
+    assert state.trade_log[-1]["symbol"] == "AAPL"
+    assert state.trade_log[-1]["action"] == "buy"
 
 
 def test_webhook_rejected_sell_rolls_back_dedup_stamp(client):
@@ -114,17 +148,23 @@ def test_webhook_rejected_sell_rolls_back_dedup_stamp(client):
     with no held position) -- not just on broker exceptions."""
     import state
 
-    resp = client.post("/webhook", json={
+    resp = _post_webhook_and_wait(client, {
         "secret": "test-webhook-secret", "action": "sell", "symbol": "AAPL",
     })
-    assert resp.status_code == 400
+    assert resp.status_code == 202  # queued -- the rejection itself happens in the background
     assert "AAPL_sell" not in state.last_signal_time
 
 
 def test_webhook_duplicate_successful_signal_rejected_and_logged(client, monkeypatch, caplog):
     """A genuinely duplicate signal (first one succeeded) within 60s must
-    still be dropped -- and, new with the rollback fix, the drop must show
-    up in the logs instead of being silent."""
+    still be dropped -- and the drop must show up in the logs instead of
+    being silent. Both requests return 202 immediately regardless of
+    outcome; the dedup itself happens inside the background worker,
+    which processes both strictly in the order they were queued
+    (webhook_queue's own ordering guarantee -- see test_webhook_queue.py),
+    so the second one reliably sees the first one's already-set dedup
+    stamp by the time its turn comes up, exactly as it would have
+    synchronously before this route became async."""
     import server
 
     calls = []
@@ -136,14 +176,13 @@ def test_webhook_duplicate_successful_signal_rejected_and_logged(client, monkeyp
     monkeypatch.setattr(server.alpaca_broker, "place_order", counting_place_order)
 
     payload = {"secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL"}
-    first = client.post("/webhook", json=payload)
-    assert first.status_code == 200
-    assert first.get_json()["status"] == "order placed"
-
     with caplog.at_level(logging.INFO):
+        first = client.post("/webhook", json=payload)
         dup = client.post("/webhook", json=payload)
-    assert dup.status_code == 200
-    assert dup.get_json() == {"status": "duplicate ignored"}
+        webhook_queue.wait_for_idle("AAPL")
+
+    assert first.status_code == 202
+    assert dup.status_code == 202
     assert any("Dropped duplicate buy stock AAPL" in r.getMessage() for r in caplog.records)
 
     # Only the first request ever reached the broker.
@@ -182,26 +221,30 @@ def test_webhook_ip_allowlist_enforce_rejects_unlisted_ip(client, monkeypatch):
 
 
 def test_webhook_ip_allowlist_enforce_allows_listed_ip(client, monkeypatch):
+    import state
+
     monkeypatch.setattr(config, "WEBHOOK_IP_MODE", "enforce")
     allowed_ip = next(iter(config.TRADINGVIEW_WEBHOOK_IPS))
-    resp = client.post(
-        "/webhook",
-        json={"secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL"},
+    resp = _post_webhook_and_wait(
+        client,
+        {"secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL"},
         headers={"X-Forwarded-For": allowed_ip},
     )
-    assert resp.status_code == 200
-    assert resp.get_json()["status"] == "order placed"
+    assert resp.status_code == 202
+    assert state.trade_log[-1]["symbol"] == "AAPL"  # not blocked -- actually executed
 
 
 def test_webhook_ip_allowlist_log_mode_does_not_reject(client, monkeypatch):
+    import state
+
     monkeypatch.setattr(config, "WEBHOOK_IP_MODE", "log")
     # Same unlisted remote_addr as the enforce-mode rejection test above --
     # log mode must NOT block the trade, only (per server.py) log a warning.
-    resp = client.post("/webhook", json={
+    resp = _post_webhook_and_wait(client, {
         "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
     })
-    assert resp.status_code == 200
-    assert resp.get_json()["status"] == "order placed"
+    assert resp.status_code == 202
+    assert state.trade_log[-1]["symbol"] == "AAPL"  # log mode never blocks -- still executed
 
 
 def test_settings_updates_risk_caps_and_persists(auth_client, db_store):
@@ -295,17 +338,19 @@ def test_webhook_sell_crypto_matches_alpaca_no_separator_position(client, monkey
     reports as 'BTCUSD' -- without normalization the held-qty gate saw
     no position and wrongly rejected every crypto sell."""
     import server
+    import state
 
     fake_position = SimpleNamespace(symbol="BTCUSD", asset_class="crypto", qty="0.235")
     monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
 
-    resp = client.post("/webhook", json={
+    resp = _post_webhook_and_wait(client, {
         "secret": "test-webhook-secret", "action": "sell", "symbol": "BTC/USD",
     })
-    assert resp.status_code == 200
-    body = resp.get_json()
-    assert body["status"] == "order placed"
-    assert body["qty"] == 0.235  # sized to the real held quantity
+    assert resp.status_code == 202
+
+    last_trade = state.trade_log[-1]
+    assert last_trade["symbol"] == "BTC/USD"
+    assert last_trade["qty"] == 0.235  # sized to the real held quantity
 
 
 def test_sanity_check_sell_branch_logs_warning_instead_of_throwing(app_module, reset_state, monkeypatch, caplog):
@@ -476,6 +521,336 @@ def test_manual_close_bypasses_bot_paused_and_max_trades(auth_client, monkeypatc
     resp = auth_client.post("/api/manual_close", json={"symbol": "AAPL"})
     assert resp.status_code == 200
     assert resp.get_json()["status"] == "order placed"
+
+
+def test_webhook_rapid_buy_then_sell_same_symbol_processed_in_order(client, monkeypatch):
+    """The critical correctness requirement behind moving /webhook to a
+    background queue at all: a sell landing shortly after a buy for the
+    SAME symbol must still be processed strictly after it, never raced
+    against it. Uses a STATEFUL fake broker (place_order updates what
+    get_positions reports) so this is a real end-to-end proof, not just
+    an ordering check -- if the sell were processed before the buy (or
+    concurrently, before the buy's fill was reflected), it would see no
+    held position and get rejected with 'no position to sell' instead of
+    actually closing it."""
+    import server
+    import state
+
+    execution_order = []
+    held_qty = {"AAPL": 0}
+
+    def fake_place_order(symbol, side, size, order_type="market"):
+        execution_order.append(side)
+        held_qty[symbol] = size if side == "buy" else 0
+        return {"id": "fake-order-id", "status": "filled"}
+
+    def fake_get_positions():
+        qty = held_qty.get("AAPL", 0)
+        if qty > 0:
+            return [SimpleNamespace(
+                symbol="AAPL", asset_class="us_equity", qty=str(qty),
+                avg_entry_price="100.0", current_price="100.0", unrealized_pl="0.0",
+            )]
+        return []
+
+    monkeypatch.setattr(server.alpaca_broker, "place_order", fake_place_order)
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", fake_get_positions)
+
+    buy_payload = {"secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL"}
+    sell_payload = {"secret": "test-webhook-secret", "action": "sell", "symbol": "AAPL"}
+
+    # Fired back-to-back on purpose -- "a sell arriving shortly after a
+    # buy". Both must come back fast (queued, not executed inline) --
+    # asserted separately below by the dedicated latency test, this one
+    # is about ORDER, not speed.
+    buy_resp = client.post("/webhook", json=buy_payload)
+    sell_resp = client.post("/webhook", json=sell_payload)
+    assert buy_resp.status_code == 202
+    assert sell_resp.status_code == 202
+
+    webhook_queue.wait_for_idle("AAPL")
+
+    assert execution_order == ["buy", "sell"]
+    assert state.trade_log[-2]["action"] == "buy"
+    assert state.trade_log[-1]["action"] == "sell"
+    # The sell actually closed the position (not rejected as "no position
+    # to sell") -- proof the buy's fill was visible by the time the sell ran.
+    assert "error" not in state.trade_log[-1]
+
+
+def test_webhook_responds_fast_even_when_a_broker_call_is_slow(client, monkeypatch):
+    """The whole point of webhook_queue: TradingView must get its 202
+    back well within its own delivery timeout regardless of how slow the
+    broker round-trip chain turns out to be. Reproduces the real
+    incident (confirmed via Railway's HTTP-level response times: two
+    genuine TradingView delivery timeouts at ~2.7-2.85s, both of which
+    had ALREADY placed their order server-side by the time TradingView
+    gave up waiting) by making get_account_info artificially slow, then
+    asserting the HTTP response comes back almost immediately regardless."""
+    import server
+
+    def slow_get_account_info():
+        time.sleep(0.5)
+        return {"equity": 10000.0, "buying_power": 10000.0, "last_equity": 10000.0}
+
+    monkeypatch.setattr(server.alpaca_broker, "get_account_info", slow_get_account_info)
+
+    start = time.monotonic()
+    resp = client.post("/webhook", json={
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+    elapsed = time.monotonic() - start
+
+    assert resp.status_code == 202
+    assert elapsed < 0.25  # comfortably under the 0.5s the slow broker call alone takes
+
+    webhook_queue.wait_for_idle("AAPL")  # let it finish before the test ends
+
+
+def test_webhook_auth_failure_still_returns_synchronously_and_fast(client):
+    """No regression on the one thing that was explicitly NOT supposed to
+    change: validation/auth failures must still fail fast and
+    synchronously, never touching webhook_queue at all. Confirmed two
+    ways -- timing (comfortably faster than any broker round-trip could
+    be) and that no worker thread/queue ever gets created for the
+    symbol, proving the call never reached enqueue()."""
+    symbol = "ZZZZ_NEVER_QUEUED_AUTH_TEST"
+
+    start = time.monotonic()
+    resp = client.post("/webhook", json={
+        "secret": "wrong", "action": "buy", "symbol": symbol,
+    })
+    elapsed = time.monotonic() - start
+
+    assert resp.status_code == 401
+    assert elapsed < 0.1
+    assert symbol not in webhook_queue._queues
+
+
+def test_webhook_persists_durably_before_responding(client, db_store):
+    """The actual durability guarantee: by the time /webhook returns 202,
+    the signal must already be a real row in webhook_signals -- not just
+    sitting in the in-memory queue -- since that row (db.py) is what
+    survives a process kill/restart, not webhook_queue.py's in-memory
+    structures."""
+    resp = client.post("/webhook", json={
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+    assert resp.status_code == 202
+
+    assert len(db_store["webhook_signals"]) == 1
+    row = db_store["webhook_signals"][0]
+    assert row["symbol"] == "AAPL"
+    assert row["action"] == "buy"
+    # Status may already have advanced past 'pending' by the time we
+    # check (this assertion races the background worker) -- what matters
+    # here is that the row EXISTS, synchronously, before the response.
+    assert row["status"] in ("pending", "processing", "done")
+
+    webhook_queue.wait_for_idle("AAPL")
+
+
+def test_webhook_signal_row_marked_done_after_successful_processing(client, db_store):
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+    assert resp.status_code == 202
+    assert db_store["webhook_signals"][0]["status"] == "done"
+
+
+def test_webhook_signal_row_marked_done_even_when_trade_is_rejected(client, db_store):
+    """A REJECTED trade (e.g. no position to sell) is still a normally
+    COMPLETED signal from the durable queue's point of view -- 'done'
+    means "ran to completion", not "the trade was accepted". Only a
+    genuinely unexpected exception should ever produce 'failed'."""
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "sell", "symbol": "AAPL",
+    })
+    assert resp.status_code == 202
+    assert db_store["webhook_signals"][0]["status"] == "done"
+
+
+def test_webhook_signal_row_marked_failed_on_unexpected_exception(client, monkeypatch, db_store):
+    import server
+
+    def boom(*a, **k):
+        raise RuntimeError("simulated unexpected bug")
+
+    monkeypatch.setattr(server, "_process_trade_signal", boom)
+
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+    assert resp.status_code == 202
+    row = db_store["webhook_signals"][0]
+    assert row["status"] == "failed"
+    assert "simulated unexpected bug" in row["error_message"]
+
+
+def test_webhook_falls_back_to_in_memory_only_if_db_persist_fails(client, monkeypatch, caplog):
+    """A transient DB outage must never be the reason a real trade signal
+    gets rejected outright -- same 'a DB hiccup never blocks a real
+    trade' rule this codebase applies everywhere else (e.g. save_trade).
+    The signal still gets queued and processed, just without a durable
+    row backing it for this one instance."""
+    import db as db_module
+    import state
+
+    def boom(*a, **k):
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr(db_module, "enqueue_webhook_signal", boom)
+
+    with caplog.at_level(logging.ERROR):
+        resp = _post_webhook_and_wait(client, {
+            "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+        })
+
+    assert resp.status_code == 202
+    assert state.trade_log[-1]["symbol"] == "AAPL"  # still processed despite the DB failure
+    assert any("durability degraded" in r.getMessage() for r in caplog.records)
+
+
+def test_webhook_synchronous_db_write_stays_fast_even_with_slow_broker(client, monkeypatch):
+    """The new durable-write-before-responding step must not reintroduce
+    the exact timeout problem this whole feature exists to fix: the
+    persist-then-ack path stays fast regardless of how slow the
+    (backgrounded) broker call turns out to be."""
+    import server
+
+    def slow_get_account_info():
+        time.sleep(0.5)
+        return {"equity": 10000.0, "buying_power": 10000.0, "last_equity": 10000.0}
+
+    monkeypatch.setattr(server.alpaca_broker, "get_account_info", slow_get_account_info)
+
+    start = time.monotonic()
+    resp = client.post("/webhook", json={
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+    elapsed = time.monotonic() - start
+
+    assert resp.status_code == 202
+    assert elapsed < 0.25  # comfortably under the 0.5s the slow broker call alone takes
+
+    webhook_queue.wait_for_idle("AAPL")
+
+
+def test_recover_pending_webhook_signals_resumes_leftover_pending_rows(client, db_store, monkeypatch):
+    """Simulates a crash: pending rows already sit in webhook_signals (as
+    if /webhook had accepted and persisted them, then the process died
+    before executing either) -- recover_pending_webhook_signals() must
+    pick them up and actually execute them through the normal path."""
+    import server
+    import state
+
+    execution_order = []
+
+    def recording_place_order(symbol, side, size, order_type="market"):
+        execution_order.append((symbol, side))
+        return {"id": "fake-order-id", "status": "filled"}
+
+    monkeypatch.setattr(server.alpaca_broker, "place_order", recording_place_order)
+
+    db_store["webhook_signals"].append({
+        "id": 101, "symbol": "AAPL", "action": "buy", "manual_flag": False,
+        "status": "pending", "received_at": None, "completed_at": None, "error_message": None,
+    })
+    db_store["webhook_signals"].append({
+        "id": 102, "symbol": "MSFT", "action": "buy", "manual_flag": False,
+        "status": "pending", "received_at": None, "completed_at": None, "error_message": None,
+    })
+
+    server.recover_pending_webhook_signals()
+    webhook_queue.wait_for_idle("AAPL")
+    webhook_queue.wait_for_idle("MSFT")
+
+    assert ("AAPL", "buy") in execution_order
+    assert ("MSFT", "buy") in execution_order
+
+    statuses = {row["id"]: row["status"] for row in db_store["webhook_signals"]}
+    assert statuses[101] == "done"
+    assert statuses[102] == "done"
+
+
+def test_recover_pending_webhook_signals_preserves_per_symbol_order(client, db_store, monkeypatch):
+    """Two pending AAPL signals (buy then sell) left over from a crash
+    must resume in the SAME order they were originally received, never
+    raced or reordered -- this is the entire reason recovery re-enqueues
+    through webhook_queue's per-symbol FIFO mechanism instead of just
+    firing all pending rows arbitrarily. Uses the same stateful-fake-
+    broker proof as the live rapid-buy-then-sell test: the sell only
+    succeeds if it actually sees the buy's fill, so a real ordering
+    violation would show up as a false rejection, not just a re-sorted list."""
+    import server
+    import state
+
+    execution_order = []
+    held_qty = {"AAPL": 0}
+
+    def fake_place_order(symbol, side, size, order_type="market"):
+        execution_order.append(side)
+        held_qty[symbol] = size if side == "buy" else 0
+        return {"id": "fake-order-id", "status": "filled"}
+
+    def fake_get_positions():
+        qty = held_qty.get("AAPL", 0)
+        if qty > 0:
+            return [SimpleNamespace(
+                symbol="AAPL", asset_class="us_equity", qty=str(qty),
+                avg_entry_price="100.0", current_price="100.0", unrealized_pl="0.0",
+            )]
+        return []
+
+    monkeypatch.setattr(server.alpaca_broker, "place_order", fake_place_order)
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", fake_get_positions)
+
+    db_store["webhook_signals"].append({
+        "id": 201, "symbol": "AAPL", "action": "buy", "manual_flag": False,
+        "status": "pending", "received_at": None, "completed_at": None, "error_message": None,
+    })
+    db_store["webhook_signals"].append({
+        "id": 202, "symbol": "AAPL", "action": "sell", "manual_flag": False,
+        "status": "pending", "received_at": None, "completed_at": None, "error_message": None,
+    })
+
+    server.recover_pending_webhook_signals()
+    webhook_queue.wait_for_idle("AAPL")
+
+    assert execution_order == ["buy", "sell"]
+    assert "error" not in state.trade_log[-1]  # sell actually saw the buy's position
+
+
+def test_recover_pending_webhook_signals_does_not_resume_stuck_rows(client, db_store, monkeypatch, caplog):
+    """A row stuck in 'processing' (crash mid-execution) or 'failed' (an
+    unexpected exception) must NEVER be auto-resumed -- there's no safe
+    way to tell whether the broker call already fired, and blindly
+    retrying risks a DUPLICATE real order. These get logged loudly
+    instead, for manual review."""
+    import server
+
+    calls = []
+    monkeypatch.setattr(
+        server.alpaca_broker, "place_order",
+        lambda symbol, side, size, order_type="market": calls.append(symbol) or {"id": "x", "status": "filled"},
+    )
+
+    db_store["webhook_signals"].append({
+        "id": 301, "symbol": "AAPL", "action": "buy", "manual_flag": False,
+        "status": "processing", "received_at": None, "completed_at": None, "error_message": None,
+    })
+    db_store["webhook_signals"].append({
+        "id": 302, "symbol": "MSFT", "action": "buy", "manual_flag": False,
+        "status": "failed", "received_at": None, "completed_at": None, "error_message": "simulated crash",
+    })
+
+    with caplog.at_level(logging.ERROR):
+        server.recover_pending_webhook_signals()
+
+    assert calls == []  # neither one ever reached the broker
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("#301" in m and "NOT auto-resumed" in m for m in messages)
+    assert any("#302" in m and "NOT auto-resumed" in m for m in messages)
 
 
 def test_backtest_response_includes_live_performance_key(auth_client):
