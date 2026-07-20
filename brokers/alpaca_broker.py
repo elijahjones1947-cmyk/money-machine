@@ -1,3 +1,4 @@
+import math
 from datetime import datetime, timedelta, timezone
 
 import alpaca_trade_api as tradeapi
@@ -87,7 +88,17 @@ class AlpacaBroker(BrokerInterface):
     def place_order(self, symbol, side, size, order_type="market"):
         try:
             is_crypto = self._is_crypto(symbol)
-            qty = round(float(size), 6) if is_crypto else int(size)
+            # Floor to 6 decimal places, never round-to-nearest: `size`
+            # here is often an exact currently-held quantity handed in to
+            # close a full position (server.py's sell-to-close and
+            # manual-close paths both do this), and round() can nudge the
+            # 6th decimal UP by a hair (e.g. round(1.5661149, 6) ==
+            # 1.566115, which is already ~1e-7 MORE than the real 1.5661149
+            # held) -- Alpaca then rejects the whole order as "insufficient
+            # funds" for trying to sell fractionally more than is actually
+            # held. Flooring guarantees the submitted qty never exceeds
+            # what's really there.
+            qty = math.floor(float(size) * 1_000_000) / 1_000_000 if is_crypto else int(size)
             if qty <= 0:
                 raise InvalidSymbolError(
                     "Alpaca: computed quantity <= 0 for {}".format(symbol)

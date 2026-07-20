@@ -533,9 +533,19 @@ def get_all_positions():
             else:
                 ac = asset_class_for_symbol(symbol)  # very old API shape with no asset_class -- fall back to the heuristic
             qty = float(p.qty)
+            # 'qty_available' (Alpaca's own field) can be LESS than 'qty'
+            # when some of the position is already tied up in another
+            # open, unfilled order -- e.g. a "day" market order submitted
+            # while the market's closed sits queued (not filled) until
+            # the next session, and Alpaca won't let a second order claim
+            # shares the first one already reserved. Falls back to 'qty'
+            # (fully available) if this API response shape ever omits the
+            # field, rather than falsely reporting a lock and blocking
+            # every close.
+            qty_available = float(getattr(p, 'qty_available', qty))
             positions.append({
                 'symbol': symbol, 'asset_class': ac, 'direction': 'long',
-                'qty': qty, 'avg_entry': float(p.avg_entry_price),
+                'qty': qty, 'qty_available': qty_available, 'avg_entry': float(p.avg_entry_price),
                 'current_price': float(p.current_price),
                 'unrealized_pl': float(p.unrealized_pl),
             })
@@ -554,7 +564,12 @@ def get_all_positions():
             unrealized = float(p.get('long', {}).get('unrealizedPL', 0)) + float(p.get('short', {}).get('unrealizedPL', 0))
             positions.append({
                 'symbol': p['instrument'], 'asset_class': 'forex', 'direction': direction,
-                'qty': qty, 'avg_entry': float(avg_price or 0),
+                # OANDA orders fill effectively instantly (no Alpaca-style
+                # queued "day" order that can partially lock a position),
+                # so there's no equivalent reserved/unavailable concept
+                # here -- the full qty is always available to close.
+                'qty': qty, 'qty_available': qty,
+                'avg_entry': float(avg_price or 0),
                 'current_price': None,
                 'unrealized_pl': unrealized,
             })
@@ -955,6 +970,17 @@ def api_manual_close():
     between page load and the click, so this is a real check, not
     defensive dead code).
 
+    Also rejects with 400 if the position's qty_available is less than
+    its full qty -- meaning some (or all) of it is already tied up in
+    another open, unfilled order (most commonly: an earlier click on
+    this exact button submitted a "day" order that's still queued
+    because the market was closed at the time, and hasn't filled yet).
+    Submitting a second close in that state doesn't get ignored or
+    queued -- Alpaca rejects it outright with a generic "insufficient
+    funds" error that has nothing to do with account funds and reads
+    like a broken feature. Checking first turns that into an accurate,
+    actionable message instead.
+
     Logged as a WARNING (not just the normal INFO trade-summary line
     every path already gets) specifically so this lands in error_log
     distinctly tagged as an operator-initiated override -- mirrors
@@ -971,6 +997,20 @@ def api_manual_close():
     position = next((p for p in get_all_positions() if p['symbol'] == symbol), None)
     if position is None:
         return jsonify({'error': 'no open position for {} (nothing to close)'.format(symbol)}), 400
+
+    qty_available = position.get('qty_available', position['qty'])
+    if qty_available < position['qty']:
+        logging.warning(
+            'MANUAL CLOSE blocked for {} {}: only {} of {} units are available to close right now -- '
+            'the rest is already tied up in another open order (e.g. an earlier close still queued '
+            'because the market was closed) or not yet settled.'.format(
+                position['asset_class'], symbol, qty_available, position['qty'],
+            )
+        )
+        return jsonify({
+            'error': '{} already has an order pending on part or all of this position -- wait for it '
+                     'to fill (or cancel it) before requesting another close.'.format(symbol)
+        }), 400
 
     close_action = 'sell' if position['direction'] == 'long' else 'buy'
     logging.warning(

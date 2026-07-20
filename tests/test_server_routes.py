@@ -346,6 +346,42 @@ def test_manual_close_rejects_symbol_with_no_open_position(auth_client):
     assert "no open position" in resp.get_json()["error"]
 
 
+def test_manual_close_blocked_when_position_already_has_a_pending_order(auth_client, monkeypatch):
+    """Real incident: Alpaca's qty_available drops below qty when part of
+    a position is already tied up in another open, unfilled order (e.g. a
+    day order queued while the market was closed) -- a second manual
+    close attempt in that state must be rejected with a clear reason
+    instead of reaching Alpaca and coming back as a confusing generic
+    'insufficient funds' error."""
+    import server
+
+    fake_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="31", qty_available="0",
+        avg_entry_price="320.89", current_price="328.14", unrealized_pl="224.61",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    resp = auth_client.post("/api/manual_close", json={"symbol": "AAPL"})
+    assert resp.status_code == 400
+    assert "pending" in resp.get_json()["error"]
+
+
+def test_manual_close_proceeds_when_full_qty_is_available(auth_client, monkeypatch):
+    """Sanity check for the guard above: when qty_available == qty (the
+    normal case, nothing else pending), the close must still go through."""
+    import server
+
+    fake_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="31", qty_available="31",
+        avg_entry_price="320.89", current_price="328.14", unrealized_pl="224.61",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    resp = auth_client.post("/api/manual_close", json={"symbol": "AAPL"})
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "order placed"
+
+
 def test_manual_close_sells_full_long_stock_position(auth_client, monkeypatch):
     """Closing a long stock position must SELL exactly the currently-held
     quantity (the same source of truth get_all_positions()/the dashboard's
