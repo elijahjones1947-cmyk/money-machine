@@ -1,5 +1,12 @@
 """
-Per-symbol sequential background processing for /webhook signals.
+Per-symbol sequential background processing for anything that can place
+an order for a symbol: /webhook (TradingView), run_position_safety_checks()
+(the safety-net force-close job), /api/manual_close, and
+/api/strategies/assign's force-close-on-switch. ALL FOUR go through this
+exact same per-symbol queue -- see enqueue()/enqueue_and_wait() -- so
+there is no remaining path where two actions for the SAME symbol can
+race or process out of order, regardless of which of the four triggered
+each one.
 
 /webhook must acknowledge TradingView fast: two real delivery-timeout
 incidents (see server.py's webhook() docstring) traced back to the route
@@ -11,12 +18,22 @@ trade had ALREADY executed successfully server-side by then.
 This module lets webhook() hand off that slow work to a background
 thread and respond immediately, while still guaranteeing per-symbol
 order: two signals for the SAME symbol (e.g. a buy immediately followed
-by a sell) are processed strictly in the order enqueue() was called for
-them, one at a time, never concurrently -- exactly the assumption
-ce9360f's retry logic and the sell-side held-qty check already depend
-on. Signals for DIFFERENT symbols run fully in parallel on their own
-dedicated worker threads, so a slow AAPL signal can never delay a GBP_JPY
-one.
+by a sell) are processed strictly in the order enqueue()/enqueue_and_wait()
+was called for them, one at a time, never concurrently -- exactly the
+assumption ce9360f's retry logic and the sell-side held-qty check
+already depend on. Signals for DIFFERENT symbols run fully in parallel
+on their own dedicated worker threads, so a slow AAPL signal can never
+delay a GBP_JPY one.
+
+The other three callers (safety-net, manual_close, strategy-switch) all
+need the RESULT synchronously -- the safety net logs/acts on the
+outcome, and the two dashboard routes render it to whoever's waiting --
+so they use enqueue_and_wait() instead of fire-and-forget enqueue(),
+built on top of the exact same per-symbol ordering. Routing them through
+here at all means a dashboard operator clicking "Close" and a webhook
+signal for the same symbol landing at nearly the same instant can no
+longer race each other placing two orders concurrently -- one now
+strictly queues behind the other, whichever arrived first.
 
 Deliberately NOT built on APScheduler (used elsewhere in this codebase
 for periodic jobs, e.g. server.py's run_position_safety_checks) -- that
@@ -52,6 +69,7 @@ it (see recover_pending_webhook_signals()), not by anything in this
 module.
 """
 
+import concurrent.futures
 import logging
 import queue
 import threading
@@ -138,10 +156,52 @@ def wait_for_idle(symbol):
     finished running (including ones enqueued by an in-flight `func`
     itself, if any). No-op if `symbol` has never been enqueued. Not used
     by production code -- webhook() deliberately never waits on its own
-    queue, that's the entire point of this module -- but tests need a
-    deterministic way to know background work has completed before
-    asserting on its effects (or before the next test's state resets
-    out from under a still-running one)."""
+    queue, that's the entire point of this module for THAT caller -- but
+    tests need a deterministic way to know background work has completed
+    before asserting on its effects (or before the next test's state
+    resets out from under a still-running one). enqueue_and_wait() below
+    is the production equivalent for callers that DO need to wait, just
+    scoped to one specific item instead of "everything queued so far".
+    """
     q = _queues.get(symbol)
     if q is not None:
         q.join()
+
+
+def enqueue_and_wait(symbol, func, timeout=30):
+    """Like enqueue(), but blocks the CALLING thread until `func` has
+    actually run -- still strictly ordered relative to any other
+    webhook_queue traffic for the same symbol, from any of the four
+    callers this module serves (see the module docstring) -- and returns
+    `func`'s return value, or re-raises whatever it raised.
+
+    For callers that need a synchronous result: run_position_safety_checks()
+    (logs/acts on whether the force-close succeeded),
+    /api/manual_close and /api/strategies/assign (both render the real
+    outcome to a dashboard operator actively waiting on it) -- unlike
+    /webhook, none of these have an external caller with its own
+    delivery timeout, so waiting here is the right tradeoff: it's what
+    closes the ordering gap those three used to leave open by bypassing
+    this queue entirely.
+
+    `timeout` (seconds) guards against a stuck queue wedging the calling
+    HTTP request/scheduled job forever -- raises
+    concurrent.futures.TimeoutError if exceeded. The work item itself is
+    NOT cancelled or removed from the queue when that happens -- it will
+    still eventually run (and whatever it does still lands in
+    trade_log/error_log as usual); only the WAITING gives up. 30s is
+    generous relative to actual per-signal processing time (the same
+    broker round-trip chain /webhook moved off its own response path,
+    normally sub-few-seconds) plus whatever, if anything, was already
+    queued ahead of it for this symbol.
+    """
+    future = concurrent.futures.Future()
+
+    def _run_and_capture():
+        try:
+            future.set_result(func())
+        except Exception as e:  # noqa: matches _drain's own Exception-only convention below
+            future.set_exception(e)
+
+    enqueue(symbol, _run_and_capture)
+    return future.result(timeout=timeout)

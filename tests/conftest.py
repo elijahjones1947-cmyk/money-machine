@@ -82,11 +82,12 @@ def _dispatch(store, sql_upper, params, as_dict):
         return []  # init_schema()'s DDL -- nothing to simulate
 
     if sql_upper.startswith("INSERT INTO TRADES"):
-        action, symbol, asset_class, qty, price, pnl, regime, source = params
+        action, symbol, asset_class, qty, price, pnl, regime, source, explanation, strategy_id = params
         row = {
             "executed_at": datetime.now(timezone.utc), "action": action,
             "symbol": symbol, "asset_class": asset_class, "qty": qty,
             "price": price, "pnl": pnl, "regime": regime, "source": source,
+            "explanation": explanation, "strategy_id": strategy_id,
         }
         store["trades"].insert(0, row)  # newest-first, matches ORDER BY executed_at DESC
         return [(len(store["trades"]), row["executed_at"])]
@@ -176,6 +177,75 @@ def _dispatch(store, sql_upper, params, as_dict):
     if sql_upper.startswith("SELECT ID, SYMBOL, ACTION, STATUS, RECEIVED_AT, ERROR_MESSAGE"):
         return [dict(r) for r in store["webhook_signals"] if r["status"] in ("processing", "failed")]
 
+    if sql_upper.startswith("SELECT COALESCE(MAX(VERSION), 0) FROM STRATEGIES"):
+        (name,) = params
+        existing = [r["version"] for r in store["strategies"] if r["name"] == name]
+        return [(max(existing) if existing else 0,)]
+
+    if sql_upper.startswith("INSERT INTO STRATEGIES"):
+        name, version, params_json, description = params
+        new_id = len(store["strategies"]) + 1
+        row = {
+            "id": new_id, "name": name, "version": version, "params": params_json,
+            "description": description, "created_at": datetime.now(timezone.utc),
+        }
+        store["strategies"].append(row)
+        return [dict(row)]
+
+    if sql_upper.startswith("SELECT ID, NAME, VERSION, PARAMS, DESCRIPTION, CREATED_AT FROM STRATEGIES WHERE ID"):
+        (strategy_id,) = params
+        for row in store["strategies"]:
+            if row["id"] == strategy_id:
+                return [dict(row)]
+        return []
+
+    if sql_upper.startswith("SELECT ID, NAME, VERSION, PARAMS, DESCRIPTION, CREATED_AT FROM STRATEGIES ORDER BY ID DESC"):
+        return [dict(r) for r in sorted(store["strategies"], key=lambda r: r["id"], reverse=True)]
+
+    if sql_upper.startswith("SELECT ID, NAME, VERSION, PARAMS, DESCRIPTION, CREATED_AT FROM STRATEGIES WHERE NAME"):
+        (name,) = params
+        matches = [r for r in store["strategies"] if r["name"] == name]
+        if not matches:
+            return []
+        return [dict(max(matches, key=lambda r: r["version"]))]
+
+    if sql_upper.startswith("INSERT INTO SYMBOL_STRATEGY_ASSIGNMENTS"):
+        symbol, strategy_id = params
+        store["symbol_strategy_assignments"][symbol] = {
+            "symbol": symbol, "strategy_id": strategy_id, "assigned_at": datetime.now(timezone.utc),
+        }
+        return []
+
+    if sql_upper.startswith(
+        "SELECT S.ID, S.NAME, S.VERSION, S.PARAMS, S.DESCRIPTION, SSA.ASSIGNED_AT FROM SYMBOL_STRATEGY_ASSIGNMENTS SSA "
+        "JOIN STRATEGIES S ON S.ID = SSA.STRATEGY_ID WHERE SSA.SYMBOL"
+    ):
+        (symbol,) = params
+        assignment = store["symbol_strategy_assignments"].get(symbol)
+        if assignment is None:
+            return []
+        strategy = next((r for r in store["strategies"] if r["id"] == assignment["strategy_id"]), None)
+        if strategy is None:
+            return []
+        return [{
+            "id": strategy["id"], "name": strategy["name"], "version": strategy["version"],
+            "params": strategy["params"], "description": strategy["description"],
+            "assigned_at": assignment["assigned_at"],
+        }]
+
+    if sql_upper.startswith("SELECT SSA.SYMBOL, S.ID, S.NAME"):
+        rows = []
+        for symbol, assignment in store["symbol_strategy_assignments"].items():
+            strategy = next((r for r in store["strategies"] if r["id"] == assignment["strategy_id"]), None)
+            if strategy is None:
+                continue
+            rows.append({
+                "symbol": symbol, "id": strategy["id"], "name": strategy["name"],
+                "version": strategy["version"], "params": strategy["params"],
+                "description": strategy["description"], "assigned_at": assignment["assigned_at"],
+            })
+        return rows
+
     raise AssertionError("Fake DB got an unrecognized query: {!r}".format(sql_upper))
 
 
@@ -237,7 +307,10 @@ class _FakePool:
 # Shared in-memory "database" for the whole test session. Cleared before
 # each route test by reset_state() below. Exposed to tests via the
 # db_store fixture for seeding/asserting on persisted data directly.
-_DB_STORE = {"trades": [], "equity_history": [], "settings": {}, "regimes": {}, "errors": [], "webhook_signals": []}
+_DB_STORE = {
+    "trades": [], "equity_history": [], "settings": {}, "regimes": {}, "errors": [],
+    "webhook_signals": [], "strategies": [], "symbol_strategy_assignments": {},
+}
 
 # Injected before server.py (or anything importing it) ever runs --
 # module-level, not inside a fixture, since a fixture only runs when a

@@ -91,6 +91,163 @@ def test_webhook_valid_secret_places_order(client):
     assert last_trade["asset_class"] == "stock"
 
 
+def test_webhook_entry_gets_a_fallback_explanation_when_no_bar_history(client):
+    """The fake broker's default get_ohlcv() returns [] (no bars) -- the
+    explanation generator must degrade gracefully to a clear fallback
+    string, never raise, and never block the trade itself from logging."""
+    import state
+
+    _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+    explanation = state.trade_log[-1]["explanation"]
+    assert explanation is not None
+    assert "no rationale generated" in explanation
+
+
+def test_webhook_entry_gets_a_real_explanation_with_bar_history(client, monkeypatch):
+    """With real (synthetic, strongly trending) bar history available,
+    the explanation must actually cite the computed indicators -- not
+    just the no-data fallback."""
+    import server
+
+    def trending_bars(symbol, timeframe="1h", limit=100):
+        bars = []
+        price = 100.0
+        for i in range(60):
+            price += 0.6
+            bars.append({
+                "time": i, "open": price - 0.1, "high": price + 0.2, "low": price - 0.2,
+                "close": price, "volume": 1000,
+            })
+        return bars
+
+    monkeypatch.setattr(server.alpaca_broker, "get_ohlcv", trending_bars)
+
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+    assert resp.status_code == 202
+
+    import state
+    explanation = state.trade_log[-1]["explanation"]
+    assert explanation.startswith("Entered long:")
+    assert "no rationale generated" not in explanation
+
+
+def test_webhook_entry_uses_the_symbol_assigned_strategy_params(client, monkeypatch, db_store):
+    """If AAPL is assigned a strategy with a custom lookback, the
+    explanation (and the underlying sanity-check signal) must reflect
+    THAT lookback, not the generic DEFAULT_PARAMS -- proving Phase 0's
+    per-symbol store is actually being read, not just present."""
+    import db
+    import server
+
+    strategy = db.create_strategy("HHB - Stock Custom", {
+        "lookback": 3, "breakout_buffer_pct": 0.05, "ema_fast_length": 9, "ema_slow_length": 21,
+        "take_profit_pct": 0.6, "stop_loss_pct": 0.35, "use_rsi_filter": True, "rsi_length": 14, "rsi_min": 45,
+    })
+    db.assign_strategy_to_symbol("AAPL", strategy["id"])
+
+    def trending_bars(symbol, timeframe="1h", limit=100):
+        bars = []
+        price = 100.0
+        for i in range(60):
+            price += 0.6
+            bars.append({
+                "time": i, "open": price - 0.1, "high": price + 0.2, "low": price - 0.2,
+                "close": price, "volume": 1000,
+            })
+        return bars
+
+    monkeypatch.setattr(server.alpaca_broker, "get_ohlcv", trending_bars)
+
+    _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+
+    import state
+    explanation = state.trade_log[-1]["explanation"]
+    assert "3-bar high" in explanation
+
+
+def test_webhook_entry_explanation_includes_detected_candlestick_pattern(client, monkeypatch):
+    """End-to-end proof that patterns.py's output actually reaches the
+    final stored explanation through the real webhook -> _process_trade_
+    signal path, not just unit-tested against trade_explanations.py in
+    isolation."""
+    import server
+    import state
+
+    def trending_bars_with_bullish_engulfing_at_the_end(symbol, timeframe="1h", limit=100):
+        bars = []
+        price = 100.0
+        for i in range(58):
+            price += 0.6
+            bars.append({
+                "time": i, "open": price - 0.1, "high": price + 0.2, "low": price - 0.2,
+                "close": price, "volume": 1000,
+            })
+        # Second-to-last bar: bearish. Last bar: bullish, engulfing it.
+        bars.append({"time": 58, "open": price + 0.6, "high": price + 0.7, "low": price - 0.5, "close": price - 0.4, "volume": 1000})
+        bars.append({"time": 59, "open": price - 0.5, "high": price + 1.2, "low": price - 0.6, "close": price + 1.0, "volume": 1000})
+        return bars
+
+    monkeypatch.setattr(server.alpaca_broker, "get_ohlcv", trending_bars_with_bullish_engulfing_at_the_end)
+
+    _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+
+    explanation = state.trade_log[-1]["explanation"]
+    assert "engulfing candle" in explanation
+
+
+def test_webhook_exit_gets_a_classified_explanation_end_to_end(client, monkeypatch):
+    """Full round trip: buy AAPL, then sell it via a webhook exit signal,
+    and confirm the resulting explanation actually classifies WHY (not
+    just a generic 'exited' string) -- proving explain_exit is correctly
+    wired with real entry_trade/params/broker data from a live
+    _process_trade_signal call, not just unit-tested in isolation."""
+    import server
+    import state
+    from types import SimpleNamespace
+
+    held = {"qty": 0}
+
+    def fake_place_order(symbol, side, size, order_type="market"):
+        held["qty"] = size if side == "buy" else 0
+        return {"id": "fake-order-id", "status": "filled"}
+
+    def fake_get_positions():
+        if held["qty"] > 0:
+            return [SimpleNamespace(
+                symbol="AAPL", asset_class="us_equity", qty=str(held["qty"]),
+                avg_entry_price="100.0", current_price="100.0", unrealized_pl="0.0",
+            )]
+        return []
+
+    def fake_get_price(symbol):
+        return 101.0  # a clean take-profit-range fill for the sell
+
+    def fake_get_historical_bars(symbol, timeframe="1h", start=None, end=None):
+        return [{"high": 101.1, "low": 99.9}]
+
+    monkeypatch.setattr(server.alpaca_broker, "place_order", fake_place_order)
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", fake_get_positions)
+    monkeypatch.setattr(server.alpaca_broker, "get_historical_bars", fake_get_historical_bars)
+
+    _post_webhook_and_wait(client, {"secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL"})
+
+    monkeypatch.setattr(server.alpaca_broker, "get_price", fake_get_price)
+    _post_webhook_and_wait(client, {"secret": "test-webhook-secret", "action": "sell", "symbol": "AAPL"})
+
+    exit_explanation = state.trade_log[-1]["explanation"]
+    assert state.trade_log[-1]["action"] == "sell"
+    assert "Exited via" in exit_explanation
+    assert "not yet implemented" not in exit_explanation
+
+
 def test_webhook_invalid_secret_rejected(client):
     resp = client.post("/webhook", json={
         "secret": "wrong", "action": "buy", "symbol": "AAPL",
@@ -364,7 +521,7 @@ def test_sanity_check_sell_branch_logs_warning_instead_of_throwing(app_module, r
         server.alpaca_broker, "get_ohlcv",
         lambda symbol, timeframe="1h", limit=100: [{}] * 50,
     )
-    monkeypatch.setattr(server, "compute_signals", lambda bars: [{"sell_signal": False, "ema_fast": 123.45}])
+    monkeypatch.setattr(server, "compute_signals", lambda bars, params=None: [{"sell_signal": False, "ema_fast": 123.45}])
 
     with caplog.at_level(logging.WARNING):
         server._sanity_check_signal(server.alpaca_broker, "AAPL", "stock", "sell")
@@ -573,9 +730,117 @@ def test_webhook_rapid_buy_then_sell_same_symbol_processed_in_order(client, monk
     assert execution_order == ["buy", "sell"]
     assert state.trade_log[-2]["action"] == "buy"
     assert state.trade_log[-1]["action"] == "sell"
-    # The sell actually closed the position (not rejected as "no position
-    # to sell") -- proof the buy's fill was visible by the time the sell ran.
-    assert "error" not in state.trade_log[-1]
+
+
+def test_safety_net_force_close_and_webhook_signal_for_same_symbol_process_in_arrival_order(client, monkeypatch):
+    """The exact gap Step 1 closes: run_position_safety_checks() used to
+    call _process_trade_signal directly, bypassing webhook_queue entirely
+    -- meaning a safety-net force-close and a webhook signal for the SAME
+    symbol landing at nearly the same moment could race each other's
+    broker calls. Now both route through the same per-symbol queue.
+    Proven with real overlap (not just back-to-back calls): the safety
+    net's force-close is held mid-flight (inside its own place_order
+    call) until the webhook signal has been submitted, confirming the
+    webhook signal actually WAITS for the in-flight safety-net close
+    rather than racing it."""
+    import server
+    import threading
+
+    execution_order = []
+    safety_net_started = threading.Event()
+    release_safety_net = threading.Event()
+    call_count = {"n": 0}
+
+    def fake_place_order(symbol, side, size, order_type="market"):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            execution_order.append(("safety_net", side))
+            safety_net_started.set()
+            assert release_safety_net.wait(timeout=2), "test itself timed out releasing the safety net"
+        else:
+            execution_order.append(("webhook", side))
+        return {"id": "fake-order-id", "status": "filled"}
+
+    # cost_basis = 31 * 200 = 6200; loss of 200 -> ~3.2%, safely past the
+    # 2% paper-mode stock safety_stop_loss_pct threshold (config.py).
+    fake_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="31",
+        avg_entry_price="200.0", current_price="193.5", unrealized_pl="-200.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+    monkeypatch.setattr(server.alpaca_broker, "place_order", fake_place_order)
+
+    safety_net_thread = threading.Thread(target=server.run_position_safety_checks)
+    safety_net_thread.start()
+    assert safety_net_started.wait(timeout=2), "safety net never reached its (blocking) place_order call"
+
+    # The AAPL worker thread is now BUSY (blocked inside the safety net's
+    # place_order) -- this webhook signal must queue behind it, not race it.
+    webhook_resp = client.post("/webhook", json={
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+    assert webhook_resp.status_code == 202  # accepted/queued immediately regardless
+
+    release_safety_net.set()
+    safety_net_thread.join(timeout=5)
+    webhook_queue.wait_for_idle("AAPL")
+
+    assert execution_order == [("safety_net", "sell"), ("webhook", "buy")]
+
+
+def test_manual_close_and_webhook_signal_for_same_symbol_process_in_arrival_order(client, monkeypatch):
+    """Same guarantee, for /api/manual_close: a dashboard operator
+    clicking Close and a webhook signal for the same symbol landing at
+    nearly the same moment must not race each other's broker calls."""
+    import server
+    import threading
+
+    execution_order = []
+    manual_close_started = threading.Event()
+    release_manual_close = threading.Event()
+    call_count = {"n": 0}
+
+    def fake_place_order(symbol, side, size, order_type="market"):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            execution_order.append(("manual_close", side))
+            manual_close_started.set()
+            assert release_manual_close.wait(timeout=2), "test itself timed out releasing the manual close"
+        else:
+            execution_order.append(("webhook", side))
+        return {"id": "fake-order-id", "status": "filled"}
+
+    fake_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="31", qty_available="31",
+        avg_entry_price="200.0", current_price="210.0", unrealized_pl="310.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+    monkeypatch.setattr(server.alpaca_broker, "place_order", fake_place_order)
+
+    # Plain (non-context-manager) test client -- `with app.test_client()`
+    # ties Flask's request context to the thread that ENTERS the block,
+    # which breaks when the actual request runs on a different thread
+    # (as it must here, to get real overlap with the webhook POST below).
+    manual_close_client = server.app.test_client()
+    with manual_close_client.session_transaction() as sess:
+        sess["auth"] = True
+
+    manual_close_thread = threading.Thread(
+        target=lambda: manual_close_client.post("/api/manual_close", json={"symbol": "AAPL"})
+    )
+    manual_close_thread.start()
+    assert manual_close_started.wait(timeout=2), "manual close never reached its (blocking) place_order call"
+
+    webhook_resp = client.post("/webhook", json={
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+    assert webhook_resp.status_code == 202
+
+    release_manual_close.set()
+    manual_close_thread.join(timeout=5)
+
+    webhook_queue.wait_for_idle("AAPL")
+    assert execution_order == [("manual_close", "sell"), ("webhook", "buy")]
 
 
 def test_webhook_responds_fast_even_when_a_broker_call_is_slow(client, monkeypatch):

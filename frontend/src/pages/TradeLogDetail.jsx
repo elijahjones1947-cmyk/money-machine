@@ -1,7 +1,25 @@
-import { useMemo } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import { useDashboard } from '../hooks/useDashboard.js';
 import { BarBreakdownChart } from '../components/BarBreakdownChart.jsx';
 import { CalendarHeatmap } from '../components/CalendarHeatmap.jsx';
+
+const SOURCE_BADGES = {
+  safety_stop_loss: { label: 'Safety net', title: 'Force-closed by the independent safety-net monitor, not a normal strategy exit' },
+  manual: { label: 'Manual', title: 'Placed directly via the dashboard’s manual buy/sell buttons' },
+  manual_close: { label: 'Manual close', title: 'Closed directly via the dashboard’s per-position Close button' },
+  strategy_switch: { label: 'Strategy switch', title: 'Force-closed because the symbol’s active strategy was reassigned' },
+};
+
+function SourceBadge({ source }) {
+  const info = SOURCE_BADGES[source];
+  if (!info) return <span className="regime-badge">Strategy</span>;
+  const isForcedExit = source === 'safety_stop_loss' || source === 'strategy_switch';
+  return (
+    <span className={isForcedExit ? 'action-badge sell' : 'regime-badge'} title={info.title}>
+      {info.label}
+    </span>
+  );
+}
 
 function breakdownBy(trades, keyFn) {
   const map = new Map();
@@ -20,6 +38,7 @@ export function TradeLogDetail() {
   const { data, loading } = useDashboard();
   const trades = data?.trades ?? [];
   const stats = data?.trade_stats;
+  const [expandedIndex, setExpandedIndex] = useState(null);
 
   const byRegime = useMemo(() => breakdownBy(trades, (t) => t.regime), [trades]);
   const bySymbol = useMemo(() => breakdownBy(trades, (t) => t.symbol), [trades]);
@@ -94,31 +113,41 @@ export function TradeLogDetail() {
                 <div className="table-scroll">
                   <table className="data-table">
                     <thead>
-                      <tr><th>Time</th><th>Action</th><th>Symbol</th><th>Asset class</th><th>Qty</th><th>Price</th><th>P&amp;L</th><th>Regime</th><th>Source</th></tr>
+                      <tr><th>Time</th><th>Action</th><th>Symbol</th><th>Asset class</th><th>Qty</th><th>Price</th><th>P&amp;L</th><th>Regime</th><th>Source</th><th>Why</th></tr>
                     </thead>
                     <tbody>
                       {reversedTrades.map((t, i) => (
-                        <tr key={i} style={t.source === 'safety_stop_loss' ? { background: 'var(--danger-dim)' } : undefined}>
-                          <td>{new Date(t.time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
-                          <td><span className={`action-badge ${t.action === 'sell' ? 'sell' : 'buy'}`}>{t.action}</span></td>
-                          <td>{t.symbol}</td>
-                          <td>{t.asset_class}</td>
-                          <td>{t.qty}</td>
-                          <td>{t.price}</td>
-                          <td style={{ color: t.pnl == null ? 'var(--text-muted)' : t.pnl >= 0 ? 'var(--accent)' : 'var(--danger)', fontWeight: 600 }}>
-                            {t.pnl == null ? '—' : `${t.pnl >= 0 ? '+' : ''}${t.pnl}`}
-                          </td>
-                          <td><span className="regime-badge">{t.regime || 'unknown'}</span></td>
-                          <td>
-                            {t.source === 'safety_stop_loss' ? (
-                              <span className="action-badge sell" title="Force-closed by the independent safety-net monitor, not a normal strategy exit">Safety net</span>
-                            ) : t.source === 'manual' ? (
-                              <span className="regime-badge">Manual</span>
-                            ) : (
-                              <span className="regime-badge">Strategy</span>
-                            )}
-                          </td>
-                        </tr>
+                        <Fragment key={i}>
+                          <tr
+                            onClick={() => t.explanation && setExpandedIndex(expandedIndex === i ? null : i)}
+                            style={{
+                              ...(t.source === 'safety_stop_loss' ? { background: 'var(--danger-dim)' } : undefined),
+                              cursor: t.explanation ? 'pointer' : 'default',
+                            }}
+                          >
+                            <td>{new Date(t.time).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
+                            <td><span className={`action-badge ${t.action === 'sell' ? 'sell' : 'buy'}`}>{t.action}</span></td>
+                            <td>{t.symbol}</td>
+                            <td>{t.asset_class}</td>
+                            <td>{t.qty}</td>
+                            <td>{t.price}</td>
+                            <td style={{ color: t.pnl == null ? 'var(--text-muted)' : t.pnl >= 0 ? 'var(--accent)' : 'var(--danger)', fontWeight: 600 }}>
+                              {t.pnl == null ? '—' : `${t.pnl >= 0 ? '+' : ''}${t.pnl}`}
+                            </td>
+                            <td><span className="regime-badge">{t.regime || 'unknown'}</span></td>
+                            <td><SourceBadge source={t.source} /></td>
+                            <td style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                              {t.explanation ? (expandedIndex === i ? '▲ hide' : '▼ show') : '—'}
+                            </td>
+                          </tr>
+                          {expandedIndex === i && t.explanation && (
+                            <tr>
+                              <td colSpan={10} style={{ background: 'var(--bg)', fontSize: 13, color: 'var(--text-secondary)', padding: '10px 12px' }}>
+                                {t.explanation}
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
                       ))}
                     </tbody>
                   </table>

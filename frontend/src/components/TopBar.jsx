@@ -33,6 +33,7 @@ export function TopBar({ theme, onThemeChange }) {
         <button className="button" onClick={handleToggleBot}>
           {data?.bot_enabled ? 'Pause' : 'Resume'}
         </button>
+        <Link to="/strategies" className="button">Strategies</Link>
         <Link to="/settings" className="button">Settings</Link>
         <button className="button" onClick={logout}>Log out</button>
       </div>

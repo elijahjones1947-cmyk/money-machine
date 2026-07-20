@@ -1,10 +1,21 @@
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import { useDashboard } from '../hooks/useDashboard.js';
 import { api } from '../api.js';
 
 export function PositionsDetail() {
   const { data, loading, refetch } = useDashboard();
   const positions = data?.positions ?? [];
+  const trades = data?.trades ?? [];
+  const [expandedSymbol, setExpandedSymbol] = useState(null);
+
+  // The most recent trade for a symbol IS the entry that opened its
+  // currently-open position -- if it had already been closed, the
+  // position wouldn't still be open. trade_log is chronological
+  // (oldest first), so the last match is the newest.
+  const entryFor = (symbol) => {
+    const matches = trades.filter((t) => t.symbol === symbol);
+    return matches.length ? matches[matches.length - 1] : null;
+  };
 
   // Which row is mid-confirm ("Close" clicked, awaiting "Confirm"/"Cancel"),
   // which row has a close request in flight, and the last close error (if
@@ -58,38 +69,61 @@ export function PositionsDetail() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>Symbol</th><th>Asset class</th><th>Qty</th><th>Avg entry</th><th>Current price</th><th>Unrealized P&amp;L</th><th>Manual close</th>
+                <th>Symbol</th><th>Asset class</th><th>Qty</th><th>Avg entry</th><th>Current price</th><th>Unrealized P&amp;L</th><th>Why</th><th>Manual close</th>
               </tr>
             </thead>
             <tbody>
-              {positions.map((p, i) => (
-                <tr key={i}>
-                  <td>{p.symbol}</td>
-                  <td>{p.asset_class}</td>
-                  <td>{p.qty}</td>
-                  <td>{p.avg_entry}</td>
-                  <td>{p.current_price}</td>
-                  <td style={{ color: p.unrealized_pl >= 0 ? 'var(--accent)' : 'var(--danger)', fontWeight: 600 }}>
-                    {p.unrealized_pl >= 0 ? '+' : ''}{p.unrealized_pl}
-                  </td>
-                  <td>
-                    {closingSymbol === p.symbol ? (
-                      <button className="button" disabled>Closing…</button>
-                    ) : confirmingSymbol === p.symbol ? (
-                      <div style={{ display: 'flex', gap: 6 }}>
-                        <button className="button button-danger" onClick={() => confirmClose(p.symbol)}>
-                          Confirm
-                        </button>
-                        <button className="button" onClick={cancelClose}>Cancel</button>
-                      </div>
-                    ) : (
-                      <button className="button button-danger" onClick={() => requestClose(p.symbol)}>
-                        Close
-                      </button>
+              {positions.map((p, i) => {
+                const entry = entryFor(p.symbol);
+                return (
+                  <Fragment key={i}>
+                    <tr>
+                      <td>{p.symbol}</td>
+                      <td>{p.asset_class}</td>
+                      <td>{p.qty}</td>
+                      <td>{p.avg_entry}</td>
+                      <td>{p.current_price}</td>
+                      <td style={{ color: p.unrealized_pl >= 0 ? 'var(--accent)' : 'var(--danger)', fontWeight: 600 }}>
+                        {p.unrealized_pl >= 0 ? '+' : ''}{p.unrealized_pl}
+                      </td>
+                      <td>
+                        {entry?.explanation ? (
+                          <button
+                            className="button"
+                            style={{ fontSize: 12, padding: '4px 8px' }}
+                            onClick={() => setExpandedSymbol(expandedSymbol === p.symbol ? null : p.symbol)}
+                          >
+                            {expandedSymbol === p.symbol ? '▲ hide' : '▼ entry reason'}
+                          </button>
+                        ) : '—'}
+                      </td>
+                      <td>
+                        {closingSymbol === p.symbol ? (
+                          <button className="button" disabled>Closing…</button>
+                        ) : confirmingSymbol === p.symbol ? (
+                          <div style={{ display: 'flex', gap: 6 }}>
+                            <button className="button button-danger" onClick={() => confirmClose(p.symbol)}>
+                              Confirm
+                            </button>
+                            <button className="button" onClick={cancelClose}>Cancel</button>
+                          </div>
+                        ) : (
+                          <button className="button button-danger" onClick={() => requestClose(p.symbol)}>
+                            Close
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                    {expandedSymbol === p.symbol && entry?.explanation && (
+                      <tr>
+                        <td colSpan={8} style={{ background: 'var(--bg)', fontSize: 13, color: 'var(--text-secondary)', padding: '10px 12px' }}>
+                          {entry.explanation}
+                        </td>
+                      </tr>
                     )}
-                  </td>
-                </tr>
-              ))}
+                  </Fragment>
+                );
+              })}
             </tbody>
           </table>
         </div>

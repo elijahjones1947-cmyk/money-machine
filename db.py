@@ -160,6 +160,57 @@ def init_schema():
                     error_message TEXT
                 );
             """)
+            # Explanation text (Phase 1) and which strategy a trade was
+            # entered/exited under (Phase 4) -- both migration-safe ADD
+            # COLUMNs since `trades` already has real production rows
+            # without either. strategy_id has no FK constraint on purpose:
+            # a trade must never fail to log just because the strategies
+            # table has a hiccup or the row referenced it was later
+            # pruned -- same "never let a side write risk looking like the
+            # trade itself failed" rule as regime/source before it.
+            cur.execute("""
+                ALTER TABLE trades ADD COLUMN IF NOT EXISTS explanation TEXT;
+            """)
+            cur.execute("""
+                ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy_id INTEGER;
+            """)
+            # Named, versioned strategy definitions -- see
+            # server.py's strategy management routes (Phase 4) and
+            # strategy_knowledge.py for what params/rules mean. Rows are
+            # immutable once created: "editing" a strategy's params
+            # creates a NEW row with the same `name` and version+1,
+            # rather than mutating one in place, so any trade's
+            # strategy_id always points at the EXACT params that were
+            # live when it executed -- the versioning point 5(a) asked
+            # for. `name` is deliberately not UNIQUE/PRIMARY KEY: multiple
+            # versions share a name on purpose.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS strategies (
+                    id SERIAL PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    params TEXT NOT NULL,
+                    description TEXT,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
+            # Which strategy (an exact, specific version -- strategy_id,
+            # not just a name) is currently active for each symbol. This
+            # is BOTH the per-symbol params store (Phase 0/1/3 read this
+            # to know which params apply to a symbol) AND, once /webhook
+            # starts requiring a strategy_id in the payload (Phase 4),
+            # the source of truth /webhook validates an incoming signal's
+            # strategy_id against -- a mismatch means a stale TradingView
+            # alert is still firing under a strategy that's no longer
+            # active for that symbol, and gets rejected rather than
+            # silently executed under out-of-date logic.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS symbol_strategy_assignments (
+                    symbol TEXT PRIMARY KEY,
+                    strategy_id INTEGER NOT NULL,
+                    assigned_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_trades_executed_at ON trades (executed_at DESC);
             """)
@@ -172,20 +223,24 @@ def init_schema():
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_webhook_signals_status ON webhook_signals (status);
             """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_strategies_name_version ON strategies (name, version DESC);
+            """)
 
 
 # --- Trades -----------------------------------------------------------
 
-def save_trade(action, symbol, asset_class, qty, price, pnl=None, regime=None, source=None):
+def save_trade(action, symbol, asset_class, qty, price, pnl=None, regime=None, source=None,
+                explanation=None, strategy_id=None):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO trades (action, symbol, asset_class, qty, price, pnl, regime, source)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                INSERT INTO trades (action, symbol, asset_class, qty, price, pnl, regime, source, explanation, strategy_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id, executed_at;
                 """,
-                (action, symbol, asset_class, qty, price, pnl, regime, source),
+                (action, symbol, asset_class, qty, price, pnl, regime, source, explanation, strategy_id),
             )
             return cur.fetchone()
 
@@ -195,7 +250,7 @@ def get_recent_trades(limit=200):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT executed_at, action, symbol, asset_class, qty, price, pnl, regime, source
+                SELECT executed_at, action, symbol, asset_class, qty, price, pnl, regime, source, explanation, strategy_id
                 FROM trades
                 ORDER BY executed_at DESC
                 LIMIT %s;
@@ -404,3 +459,135 @@ def get_stuck_webhook_signals():
                 """
             )
             return cur.fetchall()
+
+
+# --- Strategy definitions + per-symbol assignment (Phase 0/4) ------------
+# See init_schema()'s comments on `strategies`/`symbol_strategy_assignments`
+# for the versioning/immutability model.
+
+def create_strategy(name, params, description=None):
+    """Inserts a NEW, immutable strategy row -- never updates an existing
+    one. `version` auto-increments per `name` (1 for a brand-new name,
+    otherwise one more than the highest existing version for it), so
+    "editing" a strategy in the UI/API always means calling this again
+    with the same name and a modified `params`, not mutating history.
+    `params` is a plain dict (same shape as backtest.strategy.
+    DEFAULT_PARAMS) -- serialized the same way bot_settings already
+    stores JSON values (json.dumps/loads), not a native JSONB column,
+    to match this file's existing convention."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(MAX(version), 0) FROM strategies WHERE name = %s;", (name,))
+            next_version = cur.fetchone()[0] + 1
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO strategies (name, version, params, description)
+                VALUES (%s, %s, %s, %s)
+                RETURNING id, name, version, created_at;
+                """,
+                (name, next_version, json.dumps(params), description),
+            )
+            return dict(cur.fetchone())
+
+
+def get_strategy(strategy_id):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, name, version, params, description, created_at FROM strategies WHERE id = %s;",
+                (strategy_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            row = dict(row)
+            row["params"] = json.loads(row["params"])
+            return row
+
+
+def list_strategies():
+    """All strategy versions ever created, newest first -- the full
+    history, not just the latest version per name (use
+    get_latest_strategy_version for that)."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, name, version, params, description, created_at FROM strategies ORDER BY id DESC;"
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                r["params"] = json.loads(r["params"])
+            return rows
+
+
+def get_latest_strategy_version(name):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, name, version, params, description, created_at
+                FROM strategies WHERE name = %s
+                ORDER BY version DESC LIMIT 1;
+                """,
+                (name,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            row = dict(row)
+            row["params"] = json.loads(row["params"])
+            return row
+
+
+def assign_strategy_to_symbol(symbol, strategy_id):
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO symbol_strategy_assignments (symbol, strategy_id, assigned_at)
+                VALUES (%s, %s, now())
+                ON CONFLICT (symbol) DO UPDATE SET strategy_id = EXCLUDED.strategy_id, assigned_at = now();
+                """,
+                (symbol, strategy_id),
+            )
+
+
+def get_symbol_strategy_assignment(symbol):
+    """Returns the FULL joined strategy row (not just the strategy_id) --
+    every caller of this (webhook validation, explanation generation)
+    needs the actual params/name, not just the id, so join it here once
+    rather than making every caller do a second lookup."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT s.id, s.name, s.version, s.params, s.description, ssa.assigned_at
+                FROM symbol_strategy_assignments ssa
+                JOIN strategies s ON s.id = ssa.strategy_id
+                WHERE ssa.symbol = %s;
+                """,
+                (symbol,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            row = dict(row)
+            row["params"] = json.loads(row["params"])
+            return row
+
+
+def get_all_symbol_strategy_assignments():
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT ssa.symbol, s.id, s.name, s.version, s.params, s.description, ssa.assigned_at
+                FROM symbol_strategy_assignments ssa
+                JOIN strategies s ON s.id = ssa.strategy_id;
+                """
+            )
+            rows = [dict(r) for r in cur.fetchall()]
+            for r in rows:
+                r["params"] = json.loads(r["params"])
+            return rows

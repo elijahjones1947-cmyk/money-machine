@@ -13,6 +13,7 @@ import { RegimeDetail } from './pages/RegimeDetail.jsx';
 import { BacktestDetail } from './pages/BacktestDetail.jsx';
 import { HermesChat } from './pages/HermesChat.jsx';
 import { Settings } from './pages/Settings.jsx';
+import { StrategiesDetail } from './pages/StrategiesDetail.jsx';
 
 const THEME_STORAGE_KEY = 'rentgen-theme';
 
@@ -30,6 +31,7 @@ function AppShell({ theme, onThemeChange }) {
           <Route path="/regime" element={<RegimeDetail />} />
           <Route path="/backtest" element={<BacktestDetail />} />
           <Route path="/hermes" element={<HermesChat />} />
+          <Route path="/strategies" element={<StrategiesDetail />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

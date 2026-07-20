@@ -52,6 +52,19 @@ export const api = {
 
   backtest: () => request('/api/backtest'),
 
+  listStrategies: () => request('/api/strategies'),
+  createStrategy: (name, params, description) =>
+    request('/api/strategies', {
+      method: 'POST',
+      body: JSON.stringify({ name, params, description }),
+    }),
+  listStrategyAssignments: () => request('/api/strategies/assignments'),
+  assignStrategy: (symbol, strategyId) =>
+    request('/api/strategies/assign', {
+      method: 'POST',
+      body: JSON.stringify({ symbol, strategy_id: strategyId }),
+    }),
+
   hermesHistory: () => request('/api/hermes/history'),
   hermesChat: (message) =>
     request('/api/hermes/chat', { method: 'POST', body: JSON.stringify({ message }) }),

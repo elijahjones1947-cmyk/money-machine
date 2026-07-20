@@ -161,6 +161,16 @@ def compute_signals(bars, params=None):
             "breakout_price": breakout_price,
             "buy_condition": buy_condition,
             "sell_signal": sell_signal,
+            # The individual sub-conditions buy_condition ANDs together --
+            # exposed separately (additive, doesn't change buy_condition/
+            # sell_signal's own meaning) so a caller can explain WHICH
+            # rule(s) passed/failed instead of only the final verdict.
+            # trade_explanations.py is the first consumer of these.
+            "trend_bullish": trend_bullish,
+            "trend_bearish": trend_bearish,
+            "higher_high_breakout": higher_high_breakout,
+            "higher_low": higher_low,
+            "rsi_ok": rsi_ok,
         })
 
     return signals

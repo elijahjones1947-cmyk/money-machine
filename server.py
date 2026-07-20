@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, session, send_from_directory
 import logging, time, datetime, math, copy, hmac, traceback
+import concurrent.futures
 
 import config
 import state
@@ -7,6 +8,8 @@ import db
 import regime
 import alerts
 import webhook_queue
+import trade_explanations
+import patterns
 from apscheduler.schedulers.background import BackgroundScheduler
 from errors import InsufficientFundsError, MarketClosedError, InvalidSymbolError, BrokerConnectionError
 from brokers.alpaca_broker import AlpacaBroker
@@ -14,7 +17,7 @@ from brokers.oanda_broker import OandaBroker
 from risk.risk_manager import RiskManager
 from hermes import hermes_bp, init_hermes
 from backtest.metrics import compute_metrics
-from backtest.strategy import compute_signals
+from backtest.strategy import compute_signals, DEFAULT_PARAMS as STRATEGY_DEFAULT_PARAMS
 import json
 import os
 
@@ -150,6 +153,8 @@ def load_persisted_state():
                 "pnl": float(t["pnl"]) if t["pnl"] is not None else None,
                 "regime": t.get("regime"),
                 "source": t.get("source"),  # None for trades logged before this column existed -- treated as 'webhook' in the UI
+                "explanation": t.get("explanation"),  # None for trades logged before Phase 1 existed
+                "strategy_id": t.get("strategy_id"),
             }
             for t in reversed(recent_trades)  # DB gives newest-first, state.py expects oldest-first
         ]
@@ -199,6 +204,25 @@ def run_regime_checks():
                     alerts.record_broker_error(detail=traceback.format_exc())
 
 
+def _call_process_trade_signal_in_context(action, symbol, is_manual, source='webhook', force_close_qty=None):
+    """Runs _process_trade_signal() inside app.app_context() -- needed
+    because it calls jsonify() internally, and every caller of this
+    helper runs on webhook_queue's background worker thread, outside any
+    Flask request context (same reasoning as _process_queued_webhook_signal,
+    which does the same thing specifically for /webhook's own durable-
+    queue bookkeeping -- this is the plain version for the other three
+    callers, which have no such bookkeeping of their own).
+
+    ALWAYS called via webhook_queue.enqueue_and_wait(), never directly --
+    run_position_safety_checks(), /api/manual_close, and
+    /api/strategies/assign all route through the exact same per-symbol
+    queue /webhook does, specifically so none of them can race a
+    same-symbol signal from any of the others. See webhook_queue.py's
+    module docstring for the full picture."""
+    with app.app_context():
+        return _process_trade_signal(action, symbol, is_manual, source, force_close_qty)
+
+
 def run_position_safety_checks():
     """Independent backstop against a stuck losing position: if any
     open position's unrealized loss breaches its asset class's
@@ -213,6 +237,19 @@ def run_position_safety_checks():
     rejected, etc.), not a substitute for the strategy's own exit
     logic. See config.py's safety_stop_loss_pct docstring for why the
     threshold is looser than the strategy's own intended stop.
+
+    The actual force-close is routed through webhook_queue.enqueue_and_wait()
+    (same per-symbol queue /webhook uses) rather than calling
+    _process_trade_signal directly -- this used to be the one path that
+    could race a same-symbol webhook signal arriving at nearly the same
+    moment (both calling broker.place_order concurrently); now it
+    strictly queues behind (or ahead of, whichever arrived first)
+    anything else in flight for that symbol. This DOES mean a force-
+    close is no longer necessarily instantaneous if something else for
+    the same symbol is already being processed -- acceptable given
+    actual traffic (a handful of signals/day; queue depth is normally
+    zero) and explicitly signed off on given it closes a real ordering
+    gap.
 
     Runs independently of trading itself, same as run_regime_checks --
     a failure checking one position should never prevent checking (or
@@ -240,11 +277,13 @@ def run_position_safety_checks():
             )
         )
         try:
-            with app.app_context():
-                result = _process_trade_signal(
+            result = webhook_queue.enqueue_and_wait(
+                p["symbol"],
+                lambda p=p, close_action=close_action: _call_process_trade_signal_in_context(
                     close_action, p["symbol"], is_manual=False,
                     source="safety_stop_loss", force_close_qty=p["qty"],
-                )
+                ),
+            )
             if isinstance(result, tuple) and result[1] != 200:
                 logging.error("Safety-net force-close for {} did not succeed (status {})".format(p["symbol"], result[1]))
         except Exception as e:
@@ -449,7 +488,41 @@ def _get_held_qty(broker, symbol):
     return 0.0
 
 
-def _sanity_check_signal(broker, symbol, asset_class, action):
+def _compute_current_signal(broker, symbol, asset_class, params=None):
+    """Fetches recent OHLCV and returns backtest.strategy.compute_signals()'s
+    LATEST per-bar signal dict for `symbol` right now, or None if there
+    isn't enough history yet or the broker call fails. Shared by
+    _sanity_check_signal (which also compares it against the live
+    webhook's claimed action) and trade_explanations.py's entry-
+    explanation generator (which just needs the raw indicator values,
+    not a comparison) -- both read off the exact same live computation
+    instead of two independent broker fetches.
+
+    `params` defaults to backtest.strategy.DEFAULT_PARAMS if not given
+    (this function's original behavior, before per-symbol strategy
+    assignment existed) -- callers should pass the symbol's assigned
+    strategy's params (db.get_symbol_strategy_assignment) when available,
+    so this reflects what's actually configured for the symbol rather
+    than the generic default.
+
+    Never raises -- any failure here (broker error, not enough bars,
+    etc.) is logged and swallowed, matching every other best-effort side
+    computation in this codebase (regime tagging, etc.) -- this must
+    never be the reason a real trade signal fails to execute.
+    """
+    try:
+        timeframe = _REGIME_TIMEFRAMES.get(asset_class, "1h")
+        bars = broker.get_ohlcv(symbol, timeframe=timeframe, limit=100)
+        if len(bars) < 40:  # not enough history to warm up EMA-slow(21)/RSI(14)/lookback(7) reliably
+            return None
+        signals = compute_signals(bars, params)
+        return signals[-1]
+    except Exception as e:
+        logging.warning("Could not compute current signal for {}: {}".format(symbol, e))
+        return None
+
+
+def _sanity_check_signal(broker, symbol, asset_class, action, params=None):
     """Defense in depth: independently recompute the Higher High
     Breakout strategy's signal for `symbol` RIGHT NOW using the same
     Python port the backtester uses (backtest/strategy.py), and log a
@@ -467,36 +540,32 @@ def _sanity_check_signal(broker, symbol, asset_class, action):
     Treat a logged disagreement as "worth a look", not "the bot is
     broken".
 
-    Never raises -- any failure here (broker error, not enough bars,
-    etc.) is logged and swallowed so this can never be the reason a
-    real trade signal fails to execute.
+    Returns the computed signal dict (or None -- see
+    _compute_current_signal) so callers can reuse it for other purposes
+    (currently: entry trade explanations) without a second broker fetch.
     """
-    try:
-        timeframe = _REGIME_TIMEFRAMES.get(asset_class, "1h")
-        bars = broker.get_ohlcv(symbol, timeframe=timeframe, limit=100)
-        if len(bars) < 40:  # not enough history to warm up EMA-slow(21)/RSI(14)/lookback(7) reliably
-            return
-        signals = compute_signals(bars)
-        latest = signals[-1]
+    latest = _compute_current_signal(broker, symbol, asset_class, params)
+    if latest is None:
+        return None
 
-        if action == "buy" and not latest["buy_condition"]:
-            logging.warning(
-                "SANITY CHECK: webhook says BUY {} but the Python strategy port doesn't currently see a buy "
-                "condition on the {} timeframe (ema_fast={}, ema_slow={}, rsi={}, breakout_price={}). "
-                "Not blocking the trade -- just flagging a possible signal/timeframe mismatch.".format(
-                    symbol, timeframe, latest["ema_fast"], latest["ema_slow"], latest["rsi"], latest["breakout_price"],
-                )
+    timeframe = _REGIME_TIMEFRAMES.get(asset_class, "1h")
+    if action == "buy" and not latest["buy_condition"]:
+        logging.warning(
+            "SANITY CHECK: webhook says BUY {} but the Python strategy port doesn't currently see a buy "
+            "condition on the {} timeframe (ema_fast={}, ema_slow={}, rsi={}, breakout_price={}). "
+            "Not blocking the trade -- just flagging a possible signal/timeframe mismatch.".format(
+                symbol, timeframe, latest["ema_fast"], latest["ema_slow"], latest["rsi"], latest["breakout_price"],
             )
-        elif action == "sell" and not latest["sell_signal"]:
-            logging.warning(
-                "SANITY CHECK: webhook says SELL {} but the Python strategy port doesn't currently see its "
-                "momentum-exit condition on the {} timeframe (ema_fast={}, close vs ema_fast trend flip check). "
-                "Not blocking the trade -- just flagging a possible signal/timeframe mismatch.".format(
-                    symbol, timeframe, latest["ema_fast"]
-                )
+        )
+    elif action == "sell" and not latest["sell_signal"]:
+        logging.warning(
+            "SANITY CHECK: webhook says SELL {} but the Python strategy port doesn't currently see its "
+            "momentum-exit condition on the {} timeframe (ema_fast={}, close vs ema_fast trend flip check). "
+            "Not blocking the trade -- just flagging a possible signal/timeframe mismatch.".format(
+                symbol, timeframe, latest["ema_fast"]
             )
-    except Exception as e:
-        logging.warning("Sanity check skipped for {} {}: {}".format(action, symbol, e))
+        )
+    return latest
 
 
 def get_all_positions():
@@ -871,23 +940,28 @@ def webhook():
     WEBHOOK_SECRET, never exposed to the browser.
 
     Everything below through the validation checks (secret, IP allowlist,
-    missing/placeholder fields) runs synchronously and stays fast -- no
-    broker or DB calls anywhere in that path -- so a malformed or
-    unauthorized call always gets an immediate, definitive answer. Once a
-    signal passes all of that, actually EXECUTING it (sanity check,
-    broker account/price lookups, order placement -- see
-    _process_trade_signal) is hands-off to webhook_queue.enqueue()
-    instead of being awaited here: two real TradingView delivery-timeout
-    incidents traced back to that broker call chain taking long enough
-    (confirmed up to ~2.85s) that TradingView gave up waiting on the
-    response -- even though, in both cases, the trade had ALREADY
-    executed successfully server-side by then. This route now returns
-    202 the moment a signal is queued, meaning "accepted for
-    processing", NOT "trade placed" -- the real outcome (placed,
-    rejected, or errored) is still logged exactly as before by
-    _process_trade_signal itself (and still lands in error_log via
-    DBLogHandler for anything WARNING+), just after this response has
-    already gone out. webhook_queue guarantees per-symbol ordering: a
+    missing/placeholder fields, strategy_id) runs synchronously and stays
+    FAST -- but "fast" here means "no broker calls", not "no DB calls":
+    the strategy-switch safety check and the durable-queue INSERT
+    (db.enqueue_webhook_signal) are both single, indexed Postgres
+    operations, the same cost class as save_trade elsewhere in this file
+    -- nothing like the multi-call broker round-trip chain that actually
+    caused the timeout problem this route's async design exists to fix
+    (see below). A malformed, unauthorized, or stale-strategy call still
+    gets an immediate, definitive answer. Once a signal passes all of
+    that, actually EXECUTING it (sanity check, broker account/price
+    lookups, order placement -- see _process_trade_signal) is hands-off
+    to webhook_queue.enqueue() instead of being awaited here: two real
+    TradingView delivery-timeout incidents traced back to that broker
+    call chain taking long enough (confirmed up to ~2.85s) that
+    TradingView gave up waiting on the response -- even though, in both
+    cases, the trade had ALREADY executed successfully server-side by
+    then. This route now returns 202 the moment a signal is queued,
+    meaning "accepted for processing", NOT "trade placed" -- the real
+    outcome (placed, rejected, or errored) is still logged exactly as
+    before by _process_trade_signal itself (and still lands in error_log
+    via DBLogHandler for anything WARNING+), just after this response
+    has already gone out. webhook_queue guarantees per-symbol ordering: a
     sell landing shortly after a buy for the same symbol is queued
     behind it and never races it, even though a different symbol's
     signal runs fully in parallel. /api/manual_trade and /api/manual_close
@@ -958,6 +1032,53 @@ def webhook():
     if symbol in ('{{TICKER}}', '{{ticker}}'):
         logging.warning('Rejected webhook call: unsubstituted symbol placeholder')
         return jsonify({'error': 'invalid symbol'}), 400
+
+    # Strategy-switch safety gate (Phase 4): if THIS alert has been
+    # migrated to include strategy_id in its message JSON, it must match
+    # whatever's CURRENTLY assigned as active for this symbol -- a
+    # mismatch means a stale alert (still running an old Pine variant,
+    # or pointed at a symbol that's since been switched to a different
+    # strategy via /api/strategies/assign) is firing, and gets rejected
+    # instead of silently executing under out-of-date logic. Alerts that
+    # DON'T send strategy_id at all (not yet migrated -- every alert live
+    # today, until updated) are NOT gated: the field's mere presence is
+    # what turns this check on, per-alert, so migrating one alert at a
+    # time can never break the others mid-rollout.
+    #
+    # A DB error verifying this is NOT treated as a mismatch -- same "a
+    # DB hiccup must never be the reason a real trade signal gets
+    # rejected outright" rule this codebase applies everywhere else
+    # (e.g. the durability INSERT right below). Only a SUCCESSFUL lookup
+    # that actually disagrees (or finds no assignment at all) rejects.
+    incoming_strategy_id = data.get('strategy_id')
+    if incoming_strategy_id is not None:
+        assignment = None
+        verifiable = True
+        try:
+            assignment = db.get_symbol_strategy_assignment(symbol)
+        except Exception as e:
+            verifiable = False
+            logging.error(
+                'Could not verify strategy_id for {} (DB error) -- processing the signal anyway '
+                'rather than rejecting a real trade signal over an availability issue: {}'.format(symbol, e)
+            )
+        if verifiable and assignment is None:
+            logging.warning(
+                'Rejected webhook call: {} sent strategy_id={!r} but {} has no active strategy '
+                'assignment at all -- rejecting rather than guessing which logic should own this '
+                'signal.'.format(symbol, incoming_strategy_id, symbol)
+            )
+            return jsonify({'error': 'no active strategy assignment for {}'.format(symbol)}), 409
+        if verifiable and assignment is not None and assignment['id'] != incoming_strategy_id:
+            logging.warning(
+                'Rejected webhook call: {} sent strategy_id={!r} but the currently active strategy '
+                'for {} is #{} ({}) -- likely a stale alert from before a strategy switch.'.format(
+                    symbol, incoming_strategy_id, symbol, assignment['id'], assignment['name'],
+                )
+            )
+            return jsonify({
+                'error': 'stale strategy_id for {} (active strategy is #{})'.format(symbol, assignment['id'])
+            }), 409
 
     manual_flag = data.get('manual', False)
     try:
@@ -1094,6 +1215,217 @@ def recover_pending_webhook_signals():
 recover_pending_webhook_signals()
 
 
+# Params observed directly on TradingView's own alert condition strings
+# (each asset class's alert shows its Pine input.*() values, e.g. stock's
+# "(7, 0.05, 9, 21, 0.6, 0.35, 14, 45)") -- lookback, breakout_buffer_pct,
+# ema_fast_length, ema_slow_length, take_profit_pct, stop_loss_pct,
+# rsi_length, rsi_min, in that order, matching backtest.strategy.
+# DEFAULT_PARAMS' key order minus use_rsi_filter (not shown numerically
+# in the alert condition string -- assumed True, matching every observed
+# live entry). This is INFERRED from what's observably live, not
+# confirmed against the actual Pine script (this repo doesn't contain
+# it) -- correct by hand via the strategy API (create_strategy +
+# assign_strategy_to_symbol) if the real live params ever differ.
+_OBSERVED_LIVE_STRATEGY_PARAMS = {
+    "stock": {
+        "lookback": 7, "breakout_buffer_pct": 0.05, "ema_fast_length": 9, "ema_slow_length": 21,
+        "take_profit_pct": 0.6, "stop_loss_pct": 0.35, "use_rsi_filter": True, "rsi_length": 14, "rsi_min": 45,
+    },
+    "forex": {
+        "lookback": 7, "breakout_buffer_pct": 0.02, "ema_fast_length": 9, "ema_slow_length": 21,
+        "take_profit_pct": 0.2, "stop_loss_pct": 0.1, "use_rsi_filter": True, "rsi_length": 14, "rsi_min": 45,
+    },
+    "crypto": {
+        "lookback": 7, "breakout_buffer_pct": 0.15, "ema_fast_length": 9, "ema_slow_length": 21,
+        "take_profit_pct": 2, "stop_loss_pct": 1.2, "use_rsi_filter": True, "rsi_length": 14, "rsi_min": 45,
+    },
+}
+
+
+def seed_default_strategies():
+    """One-time bootstrap, run at startup: if NO strategy has ever been
+    created (a brand-new deployment of this feature), creates one named
+    strategy per asset class from _OBSERVED_LIVE_STRATEGY_PARAMS above
+    and assigns every currently watched symbol to its asset class's
+    strategy -- this IS the per-symbol params store Phase 0 asked for.
+
+    Strictly a first-run bootstrap: if ANY strategy already exists
+    (whether from a previous run of this function or an operator having
+    created one manually since), this is a complete no-op -- it must
+    never overwrite real strategy history or an operator's own edits.
+    """
+    try:
+        if db.list_strategies():
+            return
+    except Exception as e:
+        logging.error('Could not check for existing strategies at startup: {}'.format(e))
+        return
+
+    for asset_class, params in _OBSERVED_LIVE_STRATEGY_PARAMS.items():
+        try:
+            strategy = db.create_strategy(
+                'Higher High Breakout - {}'.format(asset_class.capitalize()),
+                params,
+                description='Seeded at Phase-0 rollout from params observed live on '
+                             "TradingView's alert log -- not confirmed against the Pine "
+                             'script itself.',
+            )
+        except Exception as e:
+            logging.error('Could not seed default strategy for {}: {}'.format(asset_class, e))
+            continue
+        for symbol in state.watched_symbols.get(asset_class, []):
+            try:
+                db.assign_strategy_to_symbol(symbol, strategy['id'])
+            except Exception as e:
+                logging.error('Could not assign default strategy to {}: {}'.format(symbol, e))
+
+
+seed_default_strategies()
+
+
+@app.route('/api/strategies', methods=['GET', 'POST'])
+def api_strategies():
+    """Session-gated (dashboard only, never TradingView). GET lists every
+    strategy version ever created (db.list_strategies() -- full history,
+    immutable rows, see db.py's schema comment). POST creates a NEW
+    version -- there is no PUT/edit route on purpose: "editing" a
+    strategy always means calling this again with the same `name` and
+    different `params`, which auto-increments the version rather than
+    mutating anything a trade's strategy_id might already point at."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+
+    if request.method == 'POST':
+        data = request.json or {}
+        name = data.get('name')
+        params = data.get('params')
+        description = data.get('description')
+        if not name or not params:
+            return jsonify({'error': 'name and params are required'}), 400
+        try:
+            strategy = db.create_strategy(name, params, description)
+        except Exception as e:
+            logging.error('Could not create strategy {!r}: {}'.format(name, e))
+            return jsonify({'error': 'failed to create strategy'}), 500
+        logging.warning(
+            'New strategy created: #{} {!r} v{}'.format(strategy['id'], strategy['name'], strategy['version'])
+        )
+        return jsonify(strategy), 201
+
+    try:
+        strategies = db.list_strategies()
+    except Exception as e:
+        logging.error('Could not list strategies: {}'.format(e))
+        return jsonify({'error': 'failed to list strategies'}), 500
+    return jsonify({'strategies': strategies})
+
+
+@app.route('/api/strategies/assignments', methods=['GET'])
+def api_strategy_assignments():
+    """Session-gated. Every symbol's currently active strategy (full
+    joined rows -- id/name/version/params, not just the bare id) -- what
+    the dashboard's strategy-switch UI would list, and what /webhook's
+    strategy_id check validates every non-legacy signal against."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+    try:
+        assignments = db.get_all_symbol_strategy_assignments()
+    except Exception as e:
+        logging.error('Could not list strategy assignments: {}'.format(e))
+        return jsonify({'error': 'failed to list assignments'}), 500
+    return jsonify({'assignments': assignments})
+
+
+@app.route('/api/strategies/assign', methods=['POST'])
+def api_assign_strategy():
+    """Switches `symbol`'s active strategy -- session-gated, dashboard-
+    initiated, deliberately SYNCHRONOUS (same reasoning as
+    /api/manual_close: the caller is actively waiting on the real
+    outcome to render, not an external service with its own delivery
+    timeout -- see webhook()'s docstring for why THAT route is async and
+    this one isn't).
+
+    Force-closes any open position for `symbol` BEFORE updating the
+    assignment -- Eli's explicit product decision: force-close on
+    switch, not "let the old strategy's exit logic keep running until it
+    closes naturally". The order matters, not just the fact of it:
+    closing FIRST, while the OLD assignment is still active, means the
+    close's own trade_log entry correctly records which strategy the
+    position being closed was entered under (source='strategy_switch',
+    a distinct tag from manual_close/safety_stop_loss -- see
+    trade_explanations.explain_exit). If the close fails, the assignment
+    is NOT updated -- force-close-on-switch is a guarantee, not
+    best-effort; a symbol must never end up newly assigned while a
+    position from the OLD strategy is still open and unaccounted for.
+    """
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+    data = request.json or {}
+    symbol = data.get('symbol')
+    new_strategy_id = data.get('strategy_id')
+    if not symbol or not new_strategy_id:
+        return jsonify({'error': 'symbol and strategy_id are required'}), 400
+
+    try:
+        new_strategy = db.get_strategy(new_strategy_id)
+    except Exception as e:
+        logging.error('Could not look up strategy {}: {}'.format(new_strategy_id, e))
+        return jsonify({'error': 'failed to look up strategy'}), 500
+    if new_strategy is None:
+        return jsonify({'error': 'no such strategy: {}'.format(new_strategy_id)}), 404
+
+    position = next((p for p in get_all_positions() if p['symbol'] == symbol), None)
+    closed_position = False
+    if position is not None:
+        close_action = 'sell' if position['direction'] == 'long' else 'buy'
+        logging.warning(
+            'STRATEGY SWITCH for {}: force-closing open {} {} position ({} units) before switching '
+            'to strategy #{} ({} v{}).'.format(
+                symbol, position['direction'], position['asset_class'], position['qty'],
+                new_strategy_id, new_strategy['name'], new_strategy['version'],
+            )
+        )
+        # Routed through webhook_queue (same per-symbol queue /webhook
+        # uses) rather than calling _process_trade_signal directly --
+        # see webhook_queue.py's module docstring for why all four
+        # force-close-capable paths now go through it.
+        try:
+            result = webhook_queue.enqueue_and_wait(
+                symbol,
+                lambda: _call_process_trade_signal_in_context(
+                    close_action, symbol, is_manual=True, source='strategy_switch', force_close_qty=position['qty'],
+                ),
+            )
+        except concurrent.futures.TimeoutError:
+            logging.error(
+                'STRATEGY SWITCH for {} ABORTED: timed out waiting in the queue -- assignment NOT '
+                'changed. The close attempt is still queued and will eventually run.'.format(symbol)
+            )
+            return jsonify({'error': 'timed out waiting for the close to process -- strategy NOT switched'}), 504
+        status_code = result[1] if isinstance(result, tuple) else 200
+        if status_code != 200:
+            logging.error(
+                'STRATEGY SWITCH for {} ABORTED: force-close did not succeed (status {}) -- '
+                'assignment NOT changed.'.format(symbol, status_code)
+            )
+            return jsonify({'error': 'could not close the open position -- strategy NOT switched'}), 502
+        closed_position = True
+
+    try:
+        db.assign_strategy_to_symbol(symbol, new_strategy_id)
+    except Exception as e:
+        logging.error('Could not assign strategy {} to {}: {}'.format(new_strategy_id, symbol, e))
+        return jsonify({
+            'error': 'position closed but the assignment failed to save -- retry the assignment', 'closed_position': closed_position,
+        }), 500
+
+    return jsonify({
+        'status': 'assigned', 'symbol': symbol, 'strategy_id': new_strategy_id,
+        'strategy_name': new_strategy['name'], 'strategy_version': new_strategy['version'],
+        'closed_position': closed_position,
+    })
+
+
 @app.route('/api/manual_trade', methods=['POST'])
 def api_manual_trade():
     """SPA-facing route for the dashboard's manual buy/sell buttons — gated
@@ -1178,9 +1510,23 @@ def api_manual_close():
             position['direction'], position['unrealized_pl'],
         )
     )
-    return _process_trade_signal(
-        close_action, symbol, is_manual=True, source='manual_close', force_close_qty=position['qty'],
-    )
+    # Routed through webhook_queue (same per-symbol queue /webhook uses)
+    # rather than calling _process_trade_signal directly -- closes the
+    # gap where a dashboard "Close" click and a webhook signal for the
+    # same symbol landing at nearly the same instant could otherwise
+    # race each other placing two orders concurrently. See
+    # webhook_queue.py's module docstring.
+    try:
+        return webhook_queue.enqueue_and_wait(
+            symbol,
+            lambda: _call_process_trade_signal_in_context(
+                close_action, symbol, is_manual=True, source='manual_close', force_close_qty=position['qty'],
+            ),
+        )
+    except concurrent.futures.TimeoutError:
+        logging.error('MANUAL CLOSE for {} timed out waiting in the queue -- it is still queued and will '
+                       'eventually run; check trade history/positions directly.'.format(symbol))
+        return jsonify({'error': 'timed out waiting for the close to process -- check positions directly'}), 504
 
 
 def _process_trade_signal(action, symbol, is_manual, source='webhook', force_close_qty=None):
@@ -1209,6 +1555,23 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
     broker = BROKERS[asset_class]
     is_forced_close = force_close_qty is not None
 
+    # Fetched once, up front, reused twice below: (1) so
+    # _sanity_check_signal compares against the symbol's ACTUALLY
+    # configured params (Phase 0's per-symbol store) rather than always
+    # the generic default, and (2) to generate an accurate trade
+    # explanation later (trade_explanations.py). A DB miss (no
+    # assignment yet -- e.g. a symbol added after Phase 0's bootstrap
+    # ran, or a transient DB hiccup) falls back to
+    # STRATEGY_DEFAULT_PARAMS, same as this function's behavior before
+    # per-symbol assignment existed -- never blocks a trade over this.
+    try:
+        strategy_assignment = db.get_symbol_strategy_assignment(symbol)
+    except Exception as e:
+        logging.warning('Could not look up strategy assignment for {}: {}'.format(symbol, e))
+        strategy_assignment = None
+    strategy_params = strategy_assignment['params'] if strategy_assignment else STRATEGY_DEFAULT_PARAMS
+    strategy_id = strategy_assignment['id'] if strategy_assignment else None
+
     if not state.bot_enabled and not is_manual and not is_forced_close:
         logging.warning('Rejected {} {} {}: bot paused'.format(action, asset_class, symbol))
         return jsonify({'error': 'bot paused'}), 400
@@ -1236,8 +1599,9 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
     # window with the signal never actually traded.
     state.last_signal_time[signal_key] = now
 
+    sanity_signal = None
     if not is_manual and not is_forced_close:
-        _sanity_check_signal(broker, symbol, asset_class, action)
+        sanity_signal = _sanity_check_signal(broker, symbol, asset_class, action, strategy_params)
 
     order_placed = False
     try:
@@ -1349,6 +1713,7 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
         log_prefix = (
             'SAFETY-NET FORCED CLOSE: ' if source == 'safety_stop_loss'
             else 'MANUAL CLOSE: ' if source == 'manual_close'
+            else 'STRATEGY SWITCH FORCED CLOSE: ' if source == 'strategy_switch'
             else ''
         )
         logging.info('{}{} {} {} of {} ({})'.format(log_prefix, action.upper(), size, asset_class, symbol, config.TRADING_MODE))
@@ -1363,6 +1728,61 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
                 trade_regime = latest['regime']
         except Exception as e:
             logging.warning('Could not look up regime for {}: {}'.format(symbol, e))
+
+        # Human-readable rationale (trade_explanations.py) -- generated
+        # AFTER the order already placed, same "never let a side
+        # computation risk looking like the trade itself failed" rule as
+        # the regime lookup right above. Never blocks/delays the trade.
+        explanation = None
+        try:
+            if reduces_position:
+                explanation = trade_explanations.explain_exit(
+                    action, symbol, asset_class, price, source, entry_trade=entry_trade,
+                    params=strategy_params, broker=broker,
+                    timeframe=_REGIME_TIMEFRAMES.get(asset_class, '1h'),
+                )
+            else:
+                # A forex 'sell' with reduces_position False means our own
+                # sizing logic treated it as a fresh entry (see this
+                # function's docstring on reduces_position/pnl above) --
+                # OANDA nets positions itself, so this MAY be economically
+                # closing an existing long, but from THIS function's own
+                # classification it's an entry, and the explanation follows
+                # that same classification rather than second-guessing it.
+                is_short = action == 'sell' and asset_class == 'forex'
+                signal = sanity_signal
+                if signal is None:
+                    # No sanity check ran for this path (manual, forced,
+                    # or a short entry _sanity_check_signal's buy/sell
+                    # comparison doesn't apply to) -- compute fresh,
+                    # best-effort, just for the explanation.
+                    signal = _compute_current_signal(broker, symbol, asset_class, strategy_params)
+
+                # Candlestick/Fibonacci pattern read (patterns.py) --
+                # purely additive supporting context alongside the
+                # breakout/EMA/RSI rationale above, never a substitute
+                # for it. A SEPARATE broker fetch from the one behind
+                # `signal` (that one only returns the latest bar's
+                # computed values, not the raw bars patterns.py needs) --
+                # fine to spend the extra round-trip here since this
+                # entire block already runs on webhook_queue's background
+                # worker thread, off the synchronous /webhook response
+                # path (see server.py's webhook() docstring).
+                detected_patterns = None
+                try:
+                    pattern_bars = broker.get_ohlcv(
+                        symbol, timeframe=_REGIME_TIMEFRAMES.get(asset_class, '1h'), limit=30,
+                    )
+                    detected_patterns = patterns.analyze_patterns(pattern_bars)
+                except Exception as e:
+                    logging.warning('Could not compute patterns for {}: {}'.format(symbol, e))
+
+                explanation = trade_explanations.explain_entry(
+                    action, symbol, asset_class, price, signal, strategy_params,
+                    is_manual=is_manual, is_short=is_short, detected_patterns=detected_patterns,
+                )
+        except Exception as e:
+            logging.warning('Could not generate trade explanation for {} {} {}: {}'.format(action, asset_class, symbol, e))
 
         state.trades_today[asset_class] += 1
         price_str = (
@@ -1380,9 +1800,14 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
             'pnl': pnl,
             'regime': trade_regime,
             'source': source,
+            'explanation': explanation,
+            'strategy_id': strategy_id,
         })
         try:
-            db.save_trade(action, symbol, asset_class, size, price, pnl, regime=trade_regime, source=source)
+            db.save_trade(
+                action, symbol, asset_class, size, price, pnl, regime=trade_regime, source=source,
+                explanation=explanation, strategy_id=strategy_id,
+            )
         except Exception as e:
             # Trade already executed on the broker — a DB hiccup here should
             # never look like the trade itself failed. Log and move on.
