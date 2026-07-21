@@ -8,6 +8,19 @@ last_signal_time = {}
 trade_log = []  # each entry now includes an 'asset_class' field
 equity_history = {"times": [], "values": []}  # combined equity, both brokers
 
+# Live "peak price since entry" per symbol -- keyed by symbol, holding
+# the highest price seen since entry for a long (lowest for a short).
+# Updated every run_intrabar_exit_checks() cycle (server.py) so the
+# strategy's trailing-stop rule can actually activate/trail INTRABAR,
+# not just be reconstructed after the fact from bar history the way
+# trade_explanations.py's classify_exit_reason() does for a completed
+# webhook-driven exit. Cleared the moment a position actually closes
+# (see _process_trade_signal's reduces_position branch), regardless of
+# which of the four+ exit paths closed it, so a later new entry in the
+# same symbol starts tracking fresh rather than inheriting a stale peak
+# from the position that just closed.
+peak_price_since_entry = {}
+
 # Scoped down to 2 symbols per asset class (from 4/4/3) -- a deliberate
 # product decision to concentrate live trading rather than spread thin
 # across a wide, mostly-idle watchlist. Dropped: MSFT, NVDA, SPY (stock),

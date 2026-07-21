@@ -381,7 +381,7 @@ _STATE_ATTRS = [
     "last_signal_time", "trade_log", "equity_history", "watched_symbols",
     "bot_enabled", "max_trades_per_day", "risk_percent", "trades_today",
     "risk_caps", "current_day", "failed_login_attempts", "failed_webhook_attempts",
-    "last_webhook_at", "alerted_webhook_silence",
+    "last_webhook_at", "alerted_webhook_silence", "peak_price_since_entry",
 ]
 _STATE_SNAPSHOT = {}
 

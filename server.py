@@ -292,6 +292,124 @@ def run_position_safety_checks():
                 alerts.record_broker_error(detail=traceback.format_exc())
 
 
+_INTRABAR_POLL_INTERVAL_SECONDS = 20
+
+
+def run_intrabar_exit_checks():
+    """Independent backstop against MISSING an intrabar TP/SL/trailing-
+    stop hit: TradingView only ever tells us its exit conditions on BAR
+    CLOSE (30m/1h), so a price that spikes through the take-profit level
+    mid-bar and pulls back before the bar closes is invisible to every
+    other exit path in this app -- the strategy's own webhook exit never
+    fires, and run_position_safety_checks() only ever looks at LOSSES
+    (and only every 5 minutes). This job polls every
+    _INTRABAR_POLL_INTERVAL_SECONDS and evaluates the SAME take-profit /
+    stop-loss / trailing-stop math trade_explanations.classify_exit_reason()
+    and backtest/engine.py's offline replay already use (see
+    strategy_knowledge.py's EXIT_RULES for the rationale behind each),
+    but against a LIVE price and a LIVE peak-price tracker
+    (state.peak_price_since_entry) instead of reconstructing it after
+    the fact from bar history.
+
+    Deliberately NOT the strategy's own bar-close exit and NOT the
+    safety net -- a third, independent trigger for the exact gap this
+    was built to close (see Eli's HOOD example: intrabar high above TP,
+    closed back below it, no exit fired). Tagged with its own `source`
+    ("intrabar_poll") so it's distinguishable in the trade log from a
+    normal webhook exit, a manual close, or the safety net.
+
+    Runs independently of trading itself, same as
+    run_position_safety_checks/run_regime_checks -- a failure checking
+    one position (a broker hiccup on ONE symbol's get_price(), a missing
+    strategy assignment) must never prevent checking the others."""
+    for p in get_all_positions():
+        symbol = p["symbol"]
+        asset_class = p["asset_class"]
+        broker = BROKERS.get(asset_class)
+        if broker is None:
+            continue
+
+        try:
+            strategy_assignment = db.get_symbol_strategy_assignment(symbol)
+        except Exception as e:
+            logging.warning("Intrabar check: could not look up strategy for {}: {}".format(symbol, e))
+            continue
+        if strategy_assignment is None:
+            # No assigned strategy -- no take_profit_pct/stop_loss_pct to
+            # check against. Nothing to poll for this symbol.
+            continue
+        params = strategy_assignment["params"]
+        take_profit_pct = params.get("take_profit_pct")
+        stop_loss_pct = params.get("stop_loss_pct")
+        if take_profit_pct is None or stop_loss_pct is None:
+            continue
+
+        entry_price = p["avg_entry"]
+        if entry_price <= 0:
+            continue
+        is_long = p["direction"] == "long"
+        sign = 1 if is_long else -1  # profit direction: up for a long, down for a short
+
+        try:
+            current_price = broker.get_price(symbol)
+        except Exception as e:
+            logging.warning("Intrabar check: could not fetch a live price for {}: {}".format(symbol, e))
+            continue
+
+        # Live peak-price tracker (state.py) -- the whole point of this
+        # job over the bar-close-only alternative: the trailing stop can
+        # actually activate/trail as price moves intrabar, not just be
+        # reconstructed from bar highs/lows after an exit already
+        # happened. Seeded from entry_price (not just current_price) on
+        # first observation so a big move in the gap between entry and
+        # this job's first look at the symbol still counts.
+        prior_peak = state.peak_price_since_entry.get(symbol, entry_price)
+        peak = max(prior_peak, current_price) if is_long else min(prior_peak, current_price)
+        state.peak_price_since_entry[symbol] = peak
+
+        # Same formulas as trade_explanations.classify_exit_reason() /
+        # backtest/engine.py's TP/SL/trailing-stop state machine.
+        tp_price = entry_price * (1 + sign * take_profit_pct / 100)
+        sl_price = entry_price * (1 - sign * stop_loss_pct / 100)
+        trail_activate_price = entry_price * (1 + sign * (take_profit_pct * 0.5) / 100)
+        trail_offset = entry_price * (stop_loss_pct * 0.5) / 100
+        trailing_active = (peak >= trail_activate_price) if is_long else (peak <= trail_activate_price)
+
+        hit = None
+        if (current_price >= tp_price) if is_long else (current_price <= tp_price):
+            hit = "take_profit"
+        elif trailing_active:
+            trail_stop_price = (peak - trail_offset) if is_long else (peak + trail_offset)
+            if (current_price <= trail_stop_price) if is_long else (current_price >= trail_stop_price):
+                hit = "trailing_stop"
+        elif (current_price <= sl_price) if is_long else (current_price >= sl_price):
+            hit = "stop_loss"
+
+        if hit is None:
+            continue
+
+        close_action = "sell" if is_long else "buy"
+        logging.warning(
+            "INTRABAR {}: {} {} price {} crossed the level (entry {}, peak {}) -- force-closing ({} {})".format(
+                hit.upper(), asset_class, symbol, current_price, entry_price, peak, close_action, p["qty"],
+            )
+        )
+        try:
+            result = webhook_queue.enqueue_and_wait(
+                symbol,
+                lambda symbol=symbol, close_action=close_action, p=p: _call_process_trade_signal_in_context(
+                    close_action, symbol, is_manual=False,
+                    source="intrabar_poll", force_close_qty=p["qty"],
+                ),
+            )
+            if isinstance(result, tuple) and result[1] != 200:
+                logging.error("Intrabar force-close for {} did not succeed (status {})".format(symbol, result[1]))
+        except Exception as e:
+            logging.error("Intrabar force-close FAILED for {}: {}".format(symbol, e))
+            if isinstance(e, BrokerConnectionError):
+                alerts.record_broker_error(detail=traceback.format_exc())
+
+
 def _persist_health_snapshot():
     """Best-effort snapshot of risk_manager's halt state + auth-failure
     counts + webhook timing into the bot_settings table (db.py) --
@@ -370,6 +488,13 @@ scheduler.add_job(run_regime_checks, "interval", minutes=15, next_run_time=datet
 # next_run_time=None caused the regime bug above: never leave a safety
 # job in APScheduler's paused-by-default state.
 scheduler.add_job(run_position_safety_checks, "interval", minutes=5, next_run_time=datetime.datetime.now())
+# Far more frequent than every other job here on purpose -- this is the
+# one meant to catch an intrabar TP/SL/trailing-stop touch, which by
+# definition can happen and reverse again well within a single 5-minute
+# window, let alone a 30m/1h bar. See the function's own docstring for
+# why 5 minutes (or bar-close alone) isn't enough. Immediate first run,
+# same reasoning as the jobs above.
+scheduler.add_job(run_intrabar_exit_checks, "interval", seconds=_INTRABAR_POLL_INTERVAL_SECONDS, next_run_time=datetime.datetime.now())
 # Same cadence as the safety-net check above -- 5 minutes is frequent
 # enough to catch a fresh halt or an error spike quickly without being
 # noisy, and matches the 15-minute broker-error window/2-hour webhook-
@@ -1863,6 +1988,15 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
 
         broker.place_order(symbol, action, size)
         order_placed = True
+        if reduces_position:
+            # This position is now closed -- always a FULL close in this
+            # codebase (a sell sizes to the exact held qty, a forced
+            # close uses the exact held qty too, never a partial). Clear
+            # the live peak-price tracker (state.py, run_intrabar_exit_checks)
+            # so a later new entry in this symbol starts tracking fresh
+            # rather than inheriting a stale peak from the position that
+            # just closed.
+            state.peak_price_since_entry.pop(symbol, None)
         log_prefix = (
             'SAFETY-NET FORCED CLOSE: ' if source == 'safety_stop_loss'
             else 'MANUAL CLOSE: ' if source == 'manual_close'
