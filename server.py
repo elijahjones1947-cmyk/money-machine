@@ -1258,8 +1258,13 @@ _OBSERVED_LIVE_STRATEGY_PARAMS = {
         "take_profit_pct": 0.6, "stop_loss_pct": 0.35, "use_rsi_filter": True, "rsi_length": 14, "rsi_min": 45,
     },
     "forex": {
-        "lookback": 7, "breakout_buffer_pct": 0.02, "ema_fast_length": 9, "ema_slow_length": 21,
-        "take_profit_pct": 0.2, "stop_loss_pct": 0.1, "use_rsi_filter": True, "rsi_length": 14, "rsi_min": 45,
+        # Scaled 0.45x from the 1h-era values (breakout_buffer_pct 0.02,
+        # take_profit_pct 0.2, stop_loss_pct 0.1) for the move to a 30m
+        # timeframe -- lookback/EMA/RSI bar-counts intentionally
+        # untouched, only the volatility-sensitive percentages scale
+        # with the shorter interval.
+        "lookback": 7, "breakout_buffer_pct": 0.009, "ema_fast_length": 9, "ema_slow_length": 21,
+        "take_profit_pct": 0.09, "stop_loss_pct": 0.045, "use_rsi_filter": True, "rsi_length": 14, "rsi_min": 45,
     },
     "crypto": {
         "lookback": 7, "breakout_buffer_pct": 0.15, "ema_fast_length": 9, "ema_slow_length": 21,
@@ -1277,7 +1282,7 @@ _OBSERVED_LIVE_STRATEGY_PARAMS = {
 # Pine-script params that dict feeds into `params`.
 _OBSERVED_LIVE_STRATEGY_TIMEFRAMES = {
     "stock": "30m",
-    "forex": "1h",
+    "forex": "30m",  # moved from 1h -- see the forex params comment above
     "crypto": "30m",
 }
 
