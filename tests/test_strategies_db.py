@@ -101,6 +101,59 @@ def test_get_all_symbol_strategy_assignments(db_store):
     assert all_assignments == {"AAPL": stock_strategy["id"], "BTC/USD": crypto_strategy["id"]}
 
 
+def test_create_strategy_round_trips_timeframe(db_store):
+    """Ground truth confirmed against the live TradingView alert configs
+    this session (not inferred from signal timestamps -- see
+    get_strategy_config's docstring for why that inference approach
+    actually got crypto wrong)."""
+    strategy = db.create_strategy("HHB - Crypto", {"lookback": 7}, timeframe="30m")
+    fetched = db.get_strategy(strategy["id"])
+    assert fetched["timeframe"] == "30m"
+
+
+def test_create_strategy_timeframe_is_optional(db_store):
+    """Existing callers (the dashboard's current '+ New strategy' form
+    doesn't collect a timeframe yet) must keep working without it."""
+    strategy = db.create_strategy("HHB - Stock", {"lookback": 7})
+    fetched = db.get_strategy(strategy["id"])
+    assert fetched["timeframe"] is None
+
+
+def test_get_symbol_strategy_assignment_includes_timeframe(db_store):
+    strategy = db.create_strategy("HHB - Forex", {"lookback": 7}, timeframe="1h")
+    db.assign_strategy_to_symbol("GBP_JPY", strategy["id"])
+
+    assignment = db.get_symbol_strategy_assignment("GBP_JPY")
+    assert assignment["timeframe"] == "1h"
+
+
+def test_get_all_symbol_strategy_assignments_includes_timeframe_per_asset_class(db_store):
+    """Confirms the field is present and correct for symbols spanning
+    different asset classes, not just one -- a stock symbol on 30m and
+    a forex symbol on 1h, matching the confirmed ground truth."""
+    stock_strategy = db.create_strategy("HHB - Stock", {"lookback": 7}, timeframe="30m")
+    forex_strategy = db.create_strategy("HHB - Forex", {"lookback": 7}, timeframe="1h")
+    db.assign_strategy_to_symbol("AAPL", stock_strategy["id"])
+    db.assign_strategy_to_symbol("GBP_JPY", forex_strategy["id"])
+
+    timeframes = {a["symbol"]: a["timeframe"] for a in db.get_all_symbol_strategy_assignments()}
+    assert timeframes == {"AAPL": "30m", "GBP_JPY": "1h"}
+
+
+def test_backfill_timeframe_for_strategy_name_only_fills_null_rows(db_store):
+    """The migration path for the 3 strategies that existed before
+    `timeframe` was a column -- must fill in a NULL value, and must
+    NEVER overwrite one that's already set (e.g. by a later version of
+    the same name created with create_strategy(..., timeframe=...))."""
+    v1 = db.create_strategy("HHB - Crypto", {"lookback": 7})  # no timeframe -- simulates a pre-migration row
+    v2 = db.create_strategy("HHB - Crypto", {"lookback": 9}, timeframe="1h")  # already has one
+
+    db.backfill_timeframe_for_strategy_name("HHB - Crypto", "30m")
+
+    assert db.get_strategy(v1["id"])["timeframe"] == "30m"  # filled in
+    assert db.get_strategy(v2["id"])["timeframe"] == "1h"  # untouched
+
+
 def test_save_trade_persists_explanation_and_strategy_id(db_store):
     strategy = db.create_strategy("HHB - Stock", {"lookback": 7})
     db.save_trade(

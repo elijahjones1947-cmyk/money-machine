@@ -183,31 +183,38 @@ def _dispatch(store, sql_upper, params, as_dict):
         return [(max(existing) if existing else 0,)]
 
     if sql_upper.startswith("INSERT INTO STRATEGIES"):
-        name, version, params_json, description = params
+        name, version, params_json, description, timeframe = params
         new_id = len(store["strategies"]) + 1
         row = {
             "id": new_id, "name": name, "version": version, "params": params_json,
-            "description": description, "created_at": datetime.now(timezone.utc),
+            "description": description, "timeframe": timeframe, "created_at": datetime.now(timezone.utc),
         }
         store["strategies"].append(row)
         return [dict(row)]
 
-    if sql_upper.startswith("SELECT ID, NAME, VERSION, PARAMS, DESCRIPTION, CREATED_AT FROM STRATEGIES WHERE ID"):
+    if sql_upper.startswith("SELECT ID, NAME, VERSION, PARAMS, DESCRIPTION, TIMEFRAME, CREATED_AT FROM STRATEGIES WHERE ID"):
         (strategy_id,) = params
         for row in store["strategies"]:
             if row["id"] == strategy_id:
                 return [dict(row)]
         return []
 
-    if sql_upper.startswith("SELECT ID, NAME, VERSION, PARAMS, DESCRIPTION, CREATED_AT FROM STRATEGIES ORDER BY ID DESC"):
+    if sql_upper.startswith("SELECT ID, NAME, VERSION, PARAMS, DESCRIPTION, TIMEFRAME, CREATED_AT FROM STRATEGIES ORDER BY ID DESC"):
         return [dict(r) for r in sorted(store["strategies"], key=lambda r: r["id"], reverse=True)]
 
-    if sql_upper.startswith("SELECT ID, NAME, VERSION, PARAMS, DESCRIPTION, CREATED_AT FROM STRATEGIES WHERE NAME"):
+    if sql_upper.startswith("SELECT ID, NAME, VERSION, PARAMS, DESCRIPTION, TIMEFRAME, CREATED_AT FROM STRATEGIES WHERE NAME"):
         (name,) = params
         matches = [r for r in store["strategies"] if r["name"] == name]
         if not matches:
             return []
         return [dict(max(matches, key=lambda r: r["version"]))]
+
+    if sql_upper.startswith("UPDATE STRATEGIES SET TIMEFRAME"):
+        timeframe, name = params
+        for row in store["strategies"]:
+            if row["name"] == name and row.get("timeframe") is None:
+                row["timeframe"] = timeframe
+        return []
 
     if sql_upper.startswith("INSERT INTO SYMBOL_STRATEGY_ASSIGNMENTS"):
         symbol, strategy_id = params
@@ -217,7 +224,7 @@ def _dispatch(store, sql_upper, params, as_dict):
         return []
 
     if sql_upper.startswith(
-        "SELECT S.ID, S.NAME, S.VERSION, S.PARAMS, S.DESCRIPTION, SSA.ASSIGNED_AT FROM SYMBOL_STRATEGY_ASSIGNMENTS SSA "
+        "SELECT S.ID, S.NAME, S.VERSION, S.PARAMS, S.DESCRIPTION, S.TIMEFRAME, SSA.ASSIGNED_AT FROM SYMBOL_STRATEGY_ASSIGNMENTS SSA "
         "JOIN STRATEGIES S ON S.ID = SSA.STRATEGY_ID WHERE SSA.SYMBOL"
     ):
         (symbol,) = params
@@ -230,7 +237,7 @@ def _dispatch(store, sql_upper, params, as_dict):
         return [{
             "id": strategy["id"], "name": strategy["name"], "version": strategy["version"],
             "params": strategy["params"], "description": strategy["description"],
-            "assigned_at": assignment["assigned_at"],
+            "timeframe": strategy.get("timeframe"), "assigned_at": assignment["assigned_at"],
         }]
 
     if sql_upper.startswith("SELECT SSA.SYMBOL, S.ID, S.NAME"):
@@ -242,7 +249,8 @@ def _dispatch(store, sql_upper, params, as_dict):
             rows.append({
                 "symbol": symbol, "id": strategy["id"], "name": strategy["name"],
                 "version": strategy["version"], "params": strategy["params"],
-                "description": strategy["description"], "assigned_at": assignment["assigned_at"],
+                "description": strategy["description"], "timeframe": strategy.get("timeframe"),
+                "assigned_at": assignment["assigned_at"],
             })
         return rows
 

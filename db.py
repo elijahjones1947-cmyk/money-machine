@@ -194,6 +194,18 @@ def init_schema():
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 );
             """)
+            # Added after the table already had live rows -- same
+            # ALTER-not-recreate pattern as trades' regime/source/
+            # explanation/strategy_id columns above. Nullable: existing
+            # rows need a one-time backfill (see server.py's
+            # backfill_strategy_timeframes()) rather than a value this
+            # migration could safely invent on its own. A first-class
+            # column, not a key inside `params` -- this is a hard fact
+            # about the strategy (what TradingView alert interval it
+            # actually runs on), not a tunable Pine-script parameter.
+            cur.execute("""
+                ALTER TABLE strategies ADD COLUMN IF NOT EXISTS timeframe TEXT;
+            """)
             # Which strategy (an exact, specific version -- strategy_id,
             # not just a name) is currently active for each symbol. This
             # is BOTH the per-symbol params store (Phase 0/1/3 read this
@@ -465,7 +477,7 @@ def get_stuck_webhook_signals():
 # See init_schema()'s comments on `strategies`/`symbol_strategy_assignments`
 # for the versioning/immutability model.
 
-def create_strategy(name, params, description=None):
+def create_strategy(name, params, description=None, timeframe=None):
     """Inserts a NEW, immutable strategy row -- never updates an existing
     one. `version` auto-increments per `name` (1 for a brand-new name,
     otherwise one more than the highest existing version for it), so
@@ -474,7 +486,17 @@ def create_strategy(name, params, description=None):
     `params` is a plain dict (same shape as backtest.strategy.
     DEFAULT_PARAMS) -- serialized the same way bot_settings already
     stores JSON values (json.dumps/loads), not a native JSONB column,
-    to match this file's existing convention."""
+    to match this file's existing convention.
+
+    `timeframe` (e.g. "30m", "1h") is deliberately its own keyword-only
+    param, added AFTER `description` rather than inserted before it --
+    server.py's /api/strategies POST route already calls this
+    positionally as create_strategy(name, params, description); adding
+    a new positional param in the middle would have silently shifted
+    that call's description into the wrong slot. Optional/nullable
+    (not required here) so existing callers -- including the dashboard's
+    current "+ New strategy" form, which doesn't collect a timeframe
+    yet -- keep working unchanged."""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT COALESCE(MAX(version), 0) FROM strategies WHERE name = %s;", (name,))
@@ -482,11 +504,11 @@ def create_strategy(name, params, description=None):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO strategies (name, version, params, description)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO strategies (name, version, params, description, timeframe)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING id, name, version, created_at;
                 """,
-                (name, next_version, json.dumps(params), description),
+                (name, next_version, json.dumps(params), description, timeframe),
             )
             return dict(cur.fetchone())
 
@@ -495,7 +517,7 @@ def get_strategy(strategy_id):
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, name, version, params, description, created_at FROM strategies WHERE id = %s;",
+                "SELECT id, name, version, params, description, timeframe, created_at FROM strategies WHERE id = %s;",
                 (strategy_id,),
             )
             row = cur.fetchone()
@@ -513,7 +535,7 @@ def list_strategies():
     with get_conn() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT id, name, version, params, description, created_at FROM strategies ORDER BY id DESC;"
+                "SELECT id, name, version, params, description, timeframe, created_at FROM strategies ORDER BY id DESC;"
             )
             rows = [dict(r) for r in cur.fetchall()]
             for r in rows:
@@ -526,7 +548,7 @@ def get_latest_strategy_version(name):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT id, name, version, params, description, created_at
+                SELECT id, name, version, params, description, timeframe, created_at
                 FROM strategies WHERE name = %s
                 ORDER BY version DESC LIMIT 1;
                 """,
@@ -562,7 +584,7 @@ def get_symbol_strategy_assignment(symbol):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT s.id, s.name, s.version, s.params, s.description, ssa.assigned_at
+                SELECT s.id, s.name, s.version, s.params, s.description, s.timeframe, ssa.assigned_at
                 FROM symbol_strategy_assignments ssa
                 JOIN strategies s ON s.id = ssa.strategy_id
                 WHERE ssa.symbol = %s;
@@ -582,7 +604,7 @@ def get_all_symbol_strategy_assignments():
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                SELECT ssa.symbol, s.id, s.name, s.version, s.params, s.description, ssa.assigned_at
+                SELECT ssa.symbol, s.id, s.name, s.version, s.params, s.description, s.timeframe, ssa.assigned_at
                 FROM symbol_strategy_assignments ssa
                 JOIN strategies s ON s.id = ssa.strategy_id;
                 """
@@ -591,3 +613,19 @@ def get_all_symbol_strategy_assignments():
             for r in rows:
                 r["params"] = json.loads(r["params"])
             return rows
+
+
+def backfill_timeframe_for_strategy_name(name, timeframe):
+    """One-time migration helper (see server.py's
+    backfill_strategy_timeframes()): sets `timeframe` for every version
+    of `name` that doesn't already have one. WHERE timeframe IS NULL
+    means this never overwrites a value that's already been set --
+    whether by a previous run of this same backfill, or by
+    create_strategy() specifying it directly for a strategy created
+    after the column existed."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE strategies SET timeframe = %s WHERE name = %s AND timeframe IS NULL;",
+                (timeframe, name),
+            )

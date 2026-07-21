@@ -23,7 +23,6 @@ import os
 import config
 import db
 import state
-from backtest.strategy import DEFAULT_PARAMS as STRATEGY_PARAMS
 from errors import BrokerConnectionError
 
 
@@ -159,12 +158,35 @@ def get_risk_state(ctx, **_):
 
 
 def get_strategy_config(ctx, **_):
-    """Current risk config, regime thresholds, and the Higher High
-    Breakout strategy's parameters (same defaults the backtester uses)."""
+    """Current risk config, regime thresholds, and each watched symbol's
+    ACTUAL currently-assigned strategy (name/version/params/timeframe),
+    read live from the strategies/symbol_strategy_assignments tables
+    (Phase 0/4's per-symbol strategy store) -- not a static hardcoded
+    params blob. That distinction matters: a hardcoded default drifts
+    the moment anyone switches a symbol to a different strategy via
+    /api/strategies/assign, and it never had a timeframe/resolution
+    field at all -- which previously forced a question like "what
+    timeframe does entry logic run on" to be INFERRED from signal
+    timestamp patterns, which is exactly how a handful of hour-aligned
+    BTC/USD signals once got mistaken for a 1h timeframe when it's
+    actually 30m. `timeframe` here is the confirmed fact (from the real
+    TradingView alert configs), not a guess."""
+    try:
+        assignments = db.get_all_symbol_strategy_assignments()
+    except Exception as e:
+        logging.warning('get_strategy_config could not load symbol strategy assignments: {}'.format(e))
+        assignments = []
+    symbol_strategies = {
+        a["symbol"]: {
+            "strategy_id": a["id"], "name": a["name"], "version": a["version"],
+            "timeframe": a["timeframe"], "params": a["params"],
+        }
+        for a in assignments
+    }
     return {
         "risk_config": config.get_risk_config(),
         "regime_config": config.get_regime_config(),
-        "strategy_params": STRATEGY_PARAMS,
+        "symbol_strategies": symbol_strategies,
         "risk_percent": state.risk_percent,
         "max_trades_per_day": state.max_trades_per_day,
         "watched_symbols": state.watched_symbols,
@@ -428,7 +450,7 @@ TOOL_SCHEMAS = [
     {"name": "get_market_regime", "description": "Get the latest classified market regime (trending/choppy/volatile) for watched symbols.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string", "description": "Filter to one symbol (optional)"}}}},
     {"name": "get_recent_signals", "description": "Get recent trade signals that were acted on (note: only executed signals are tracked, not rejected ones).", "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
     {"name": "get_risk_state", "description": "Get the live risk manager's halt status per asset class and today's running P&L.", "input_schema": {"type": "object", "properties": {}}},
-    {"name": "get_strategy_config", "description": "Get the current risk config, regime thresholds, strategy parameters, and watched symbols.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_strategy_config", "description": "Get the current risk config, regime thresholds, watched symbols, and each symbol's actually-assigned strategy (name, version, params, and its timeframe/resolution -- e.g. 30m or 1h).", "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_asset_market_data", "description": "Get recent OHLCV price bars for a specific symbol.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}, "asset_class": {"type": "string", "enum": ["stock", "forex", "crypto"]}, "timeframe": {"type": "string", "enum": ["1m", "5m", "15m", "1h", "4h", "1d"]}, "bars": {"type": "integer"}}, "required": ["symbol"]}},
     {"name": "get_broad_market_context", "description": "Get a snapshot of major index/sector ETFs (SPY, QQQ, DIA, and key sector ETFs) as a proxy for overall market conditions.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_backtest_results", "description": "Get metrics (win rate, max drawdown, Sharpe) from the most recent backtest run, overall and broken out by market regime. Pass symbol to filter to one instrument.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}}}},

@@ -1267,6 +1267,20 @@ _OBSERVED_LIVE_STRATEGY_PARAMS = {
     },
 }
 
+# What TradingView alert interval each asset class's strategy actually
+# runs on -- confirmed directly against the live alert configs (not
+# inferred from signal timestamps, which is exactly how Hermes got
+# crypto wrong: a handful of hour-aligned BTC/USD signals looked like
+# 1h when it's actually 30m). A separate dict, not folded into
+# _OBSERVED_LIVE_STRATEGY_PARAMS above, because `timeframe` is its own
+# schema column (strategies.timeframe), not one of the tunable
+# Pine-script params that dict feeds into `params`.
+_OBSERVED_LIVE_STRATEGY_TIMEFRAMES = {
+    "stock": "30m",
+    "forex": "1h",
+    "crypto": "30m",
+}
+
 
 def seed_default_strategies():
     """One-time bootstrap, run at startup: if NO strategy has ever been
@@ -1295,6 +1309,7 @@ def seed_default_strategies():
                 description='Seeded at Phase-0 rollout from params observed live on '
                              "TradingView's alert log -- not confirmed against the Pine "
                              'script itself.',
+                timeframe=_OBSERVED_LIVE_STRATEGY_TIMEFRAMES[asset_class],
             )
         except Exception as e:
             logging.error('Could not seed default strategy for {}: {}'.format(asset_class, e))
@@ -1306,7 +1321,26 @@ def seed_default_strategies():
                 logging.error('Could not assign default strategy to {}: {}'.format(symbol, e))
 
 
+def backfill_strategy_timeframes():
+    """One-time data migration for the strategies seeded before
+    `timeframe` existed as a column (id 1/2/3 in production -- Stock/
+    Forex/Crypto). Confirmed directly against the live TradingView alert
+    configs this session, not inferred: Stock/Crypto run on 30m, Forex
+    on 1h. Idempotent (db.backfill_timeframe_for_strategy_name only ever
+    touches rows where timeframe IS NULL), so safe to call unconditionally
+    on every startup -- a no-op once every row has a value, and it
+    covers a fresh deployment too (though seed_default_strategies()
+    above already sets timeframe correctly for that case)."""
+    for asset_class, timeframe in _OBSERVED_LIVE_STRATEGY_TIMEFRAMES.items():
+        name = 'Higher High Breakout - {}'.format(asset_class.capitalize())
+        try:
+            db.backfill_timeframe_for_strategy_name(name, timeframe)
+        except Exception as e:
+            logging.error('Could not backfill timeframe for {!r}: {}'.format(name, e))
+
+
 seed_default_strategies()
+backfill_strategy_timeframes()
 
 
 @app.route('/api/strategies', methods=['GET', 'POST'])
@@ -1326,10 +1360,11 @@ def api_strategies():
         name = data.get('name')
         params = data.get('params')
         description = data.get('description')
+        timeframe = data.get('timeframe')
         if not name or not params:
             return jsonify({'error': 'name and params are required'}), 400
         try:
-            strategy = db.create_strategy(name, params, description)
+            strategy = db.create_strategy(name, params, description, timeframe=timeframe)
         except Exception as e:
             logging.error('Could not create strategy {!r}: {}'.format(name, e))
             return jsonify({'error': 'failed to create strategy'}), 500
