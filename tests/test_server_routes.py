@@ -1187,6 +1187,29 @@ def test_webhook_watchlist_gate_does_not_apply_to_still_watched_symbols(client):
     assert state.trade_log[-1]["symbol"] == "AAPL"
 
 
+def test_webhook_allows_a_3rd_stock_symbol_while_forex_and_crypto_stay_at_2(client, caplog):
+    """RBLX was added as a 3rd stock symbol alongside AAPL/HOOD (not a
+    replacement) -- stock's watchlist is asset-class-specific, not a
+    uniform "2 per class" rule, so it must accept RBLX with no watchlist
+    rejection while forex/crypto (still exactly 2 symbols each) are
+    unaffected either way."""
+    import state
+
+    assert len(state.watched_symbols["stock"]) == 3
+    assert len(state.watched_symbols["forex"]) == 2
+    assert len(state.watched_symbols["crypto"]) == 2
+
+    with caplog.at_level(logging.WARNING):
+        resp = _post_webhook_and_wait(client, {
+            "secret": "test-webhook-secret", "action": "buy", "symbol": "RBLX",
+        })
+    assert resp.status_code == 202
+    assert state.trade_log[-1]["symbol"] == "RBLX"
+    assert state.trade_log[-1]["action"] == "buy"
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("not currently watched" in m for m in messages)
+
+
 def test_manual_trade_bypasses_watchlist_gate(auth_client):
     """An operator explicitly using the dashboard's manual buy/sell
     buttons must never be blocked by the watchlist scope -- same

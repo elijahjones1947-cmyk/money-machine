@@ -15,8 +15,12 @@ equity_history = {"times": [], "values": []}  # combined equity, both brokers
 # _process_trade_signal docstring for how this is actually ENFORCED
 # (removing a symbol from here alone does not stop /webhook from
 # accepting it -- that's a separate server-side gate).
+#
+# Stock later grew to 3 (RBLX added alongside AAPL/HOOD, not a
+# replacement) -- forex/crypto stayed at 2. Nothing asset-class-uniform
+# about the "2" above; it's just what each list happens to hold.
 watched_symbols = {
-    "stock": ["AAPL", "HOOD"],
+    "stock": ["AAPL", "HOOD", "RBLX"],
     "forex": ["GBP_JPY", "USD_JPY"],
     "crypto": ["BTC/USD", "ETH/USD"],
 }
