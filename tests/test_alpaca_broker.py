@@ -66,3 +66,16 @@ def test_place_order_uses_gtc_for_crypto_and_day_for_stock():
 
     assert calls[0]["time_in_force"] == "gtc"
     assert calls[1]["time_in_force"] == "day"
+
+
+def test_30m_timeframe_is_a_supported_get_ohlcv_mapping():
+    """Confirms stock/crypto's 30m was never affected by the OANDA gap
+    (brokers/oanda_broker.py's _GRANULARITY_MAP was missing "30m" until
+    fixed alongside this) -- Alpaca's own _TIMEFRAME_MAP already had it.
+    A plain mapping check, not a network-call test: get_ohlcv() itself
+    (Alpaca SDK calls) is exercised elsewhere; this only pins that the
+    lookup for "30m" specifically doesn't raise "Unsupported timeframe"."""
+    from brokers.alpaca_broker import _BAR_DURATION, _TIMEFRAME_MAP
+
+    assert "30m" in _TIMEFRAME_MAP
+    assert "30m" in _BAR_DURATION

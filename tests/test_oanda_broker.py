@@ -15,11 +15,51 @@ docstring for why THAT needs a fake DB pool and fake broker instances
 instead of importing brokers directly).
 """
 
+import pytest
+
 from brokers.oanda_broker import OandaBroker
 
 
 def _make_broker():
     return OandaBroker(api_key="test-key", account_id="test-account", base_url="https://api-fxpractice.oanda.com")
+
+
+class _FakeCandlesResponse:
+    status_code = 200
+
+    def json(self):
+        return {"candles": []}
+
+
+def test_get_ohlcv_maps_30m_to_oanda_m30_granularity(monkeypatch):
+    """The gap this closes: forex strategies now report a real 30m
+    timeframe (server.py's _OBSERVED_LIVE_STRATEGY_TIMEFRAMES), and
+    get_asset_market_data (a Hermes tool) can be asked for an arbitrary
+    timeframe -- "30m" must actually be a supported OANDA granularity,
+    not just stock/crypto's (Alpaca's _TIMEFRAME_MAP already had it --
+    see test_alpaca_broker.py's confirming test). Live incident: Hermes
+    asked for 30m GBP_JPY bars and got ValueError: Unsupported timeframe."""
+    broker = _make_broker()
+    captured = {}
+
+    def fake_get(url, params=None, timeout=None):
+        captured["params"] = params
+        return _FakeCandlesResponse()
+
+    monkeypatch.setattr(broker.session, "get", fake_get)
+
+    bars = broker.get_ohlcv("GBP_JPY", timeframe="30m", limit=50)
+
+    assert bars == []  # no candles in the fake response, but no error either
+    assert captured["params"]["granularity"] == "M30"
+
+
+def test_get_ohlcv_still_rejects_a_genuinely_unsupported_timeframe():
+    """Regression guard for the ValueError path itself -- adding 30m
+    must not turn this into a silent pass-through for anything."""
+    broker = _make_broker()
+    with pytest.raises(ValueError, match="Unsupported timeframe"):
+        broker.get_ohlcv("GBP_JPY", timeframe="2h", limit=50)
 
 
 def test_session_retries_once_on_connection_and_read_timeouts():
