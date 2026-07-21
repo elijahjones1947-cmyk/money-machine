@@ -312,6 +312,7 @@ def test_strategy_switch_force_close_and_webhook_signal_for_same_symbol_process_
     switch_started = threading.Event()
     release_switch = threading.Event()
     call_count = {"n": 0}
+    position_closed = {"value": False}
 
     def fake_place_order(symbol, side, size, order_type="market"):
         call_count["n"] += 1
@@ -319,6 +320,11 @@ def test_strategy_switch_force_close_and_webhook_signal_for_same_symbol_process_
             execution_order.append(("strategy_switch", side))
             switch_started.set()
             assert release_switch.wait(timeout=2), "test itself timed out releasing the switch"
+            # See the safety-net ordering test (test_server_routes.py)
+            # for why this needs to reflect the close before the queued
+            # webhook buy is processed -- the overlapping-buy guard
+            # checks get_positions().
+            position_closed["value"] = True
         else:
             execution_order.append(("webhook", side))
         return {"id": "fake-order-id", "status": "filled"}
@@ -327,7 +333,10 @@ def test_strategy_switch_force_close_and_webhook_signal_for_same_symbol_process_
         symbol="AAPL", asset_class="us_equity", qty="31", qty_available="31",
         avg_entry_price="200.0", current_price="210.0", unrealized_pl="310.0",
     )
-    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+    monkeypatch.setattr(
+        server.alpaca_broker, "get_positions",
+        lambda: [] if position_closed["value"] else [fake_position],
+    )
     monkeypatch.setattr(server.alpaca_broker, "place_order", fake_place_order)
 
     switch_thread = threading.Thread(

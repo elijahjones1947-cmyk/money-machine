@@ -4,10 +4,15 @@ surfaces each symbol's ACTUAL assigned strategy (including timeframe)
 live from the strategies/symbol_strategy_assignments tables, not a
 static hardcoded params blob. See db.py's tests (test_strategies_db.py)
 for the underlying storage layer this reads from.
+
+Also covers get_strategy_rationale -- the WHY behind the strategy's
+rules (strategy_knowledge.py), distinct from get_strategy_config's
+numbers.
 """
 
 import db
 import hermes_tools
+import strategy_knowledge
 
 
 def test_get_strategy_config_includes_symbol_strategies_with_timeframe(db_store):
@@ -72,3 +77,33 @@ def test_get_strategy_config_handles_a_db_error_without_raising(db_store, monkey
 
     result = hermes_tools.get_strategy_config(None)
     assert result["symbol_strategies"] == {}
+
+
+# --- get_strategy_rationale (the WHY, distinct from get_strategy_config) --
+
+def test_get_strategy_rationale_matches_strategy_knowledge_describe_strategy():
+    """Just a thin passthrough -- confirms it's actually wired to the
+    real content, not a stub."""
+    assert hermes_tools.get_strategy_rationale(None) == strategy_knowledge.describe_strategy()
+
+
+def test_get_strategy_rationale_includes_the_overview_and_every_rule():
+    result = hermes_tools.get_strategy_rationale(None)
+    assert result["name"] == "Higher High Breakout"
+    assert "overview" in result and len(result["overview"]) > 0
+    for rule in ("trend_filter", "breakout", "higher_low", "rsi_filter"):
+        assert rule in result["entry_rules"]
+        assert "rationale" in result["entry_rules"][rule]
+    for rule in ("take_profit", "stop_loss", "trailing_stop", "momentum_exit"):
+        assert rule in result["exit_rules"]
+        assert "rationale" in result["exit_rules"][rule]
+
+
+def test_get_strategy_rationale_does_not_touch_the_db(db_store, monkeypatch):
+    """Static content (same for every symbol/strategy version) -- unlike
+    get_strategy_config, this must not need a DB round-trip at all."""
+    def fail_if_called(*a, **k):
+        raise AssertionError("get_strategy_rationale should never touch the DB")
+
+    monkeypatch.setattr(db, "get_all_symbol_strategy_assignments", fail_if_called)
+    hermes_tools.get_strategy_rationale(None)  # must not raise

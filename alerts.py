@@ -81,7 +81,11 @@ BROKER_ERROR_WINDOW_SECONDS = 45 * 60  # 45 minutes
 BROKER_ERROR_THRESHOLD = 3  # >= this many broker errors within the window above triggers an alert
 
 
-def _post_to_discord(title, description):
+def _post_to_discord(title, description, color=0xE74C3C):
+    """color defaults to red -- every ALERT in this module is a
+    "something's wrong" condition. post_trade_notification below passes
+    its own (blue) so a routine trade doesn't visually read as an
+    incident in the same channel."""
     webhook_url = config.DISCORD_ALERT_WEBHOOK_URL
     if not webhook_url:
         return
@@ -89,7 +93,7 @@ def _post_to_discord(title, description):
         "embeds": [{
             "title": title,
             "description": description,
-            "color": 0xE74C3C,  # red -- every alert here is a "something's wrong" condition
+            "color": color,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }]
     }
@@ -99,6 +103,31 @@ def _post_to_discord(title, description):
             logging.warning("Discord alert post failed ({}): {}".format(resp.status_code, resp.text[:200]))
     except requests.RequestException as e:
         logging.warning("Discord alert post failed: {}".format(e))
+
+
+_TRADE_NOTIFICATION_COLOR = 0x3498DB  # blue -- routine trade info, deliberately distinct from the red "something's wrong" alerts above
+
+
+def post_trade_notification(action, symbol, asset_class, qty, price, pnl, explanation):
+    """Pushes a trade's generated explanation (trade_explanations.py) to
+    Discord as it happens -- proactive instead of requiring someone to
+    open the dashboard's Trade Log page or ask Hermes after the fact.
+    Reuses the exact same webhook/best-effort pattern as every alert
+    above via _post_to_discord (silently no-ops if
+    DISCORD_ALERT_WEBHOOK_URL isn't set, never raises).
+
+    NOT edge-triggered/latched like the alerts above -- that machinery
+    exists so a PERSISTING condition (halted, silent, erroring) doesn't
+    spam every scheduled check while it continues being true. A trade is
+    a one-time, discrete event, not a persisting condition -- there's
+    nothing to latch against, so this posts once per call, always."""
+    summary = "{} {} {} @ {}".format(action.upper(), qty, symbol, price)
+    if pnl is not None:
+        summary += " (P&L: {:+.2f})".format(pnl)
+    description = summary
+    if explanation:
+        description += "\n\n" + explanation
+    _post_to_discord("{} {}".format(action.upper(), symbol), description, color=_TRADE_NOTIFICATION_COLOR)
 
 
 def _trigger_github_dispatch(event_type, client_payload):

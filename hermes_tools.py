@@ -23,6 +23,7 @@ import os
 import config
 import db
 import state
+import strategy_knowledge
 from errors import BrokerConnectionError
 
 
@@ -191,6 +192,22 @@ def get_strategy_config(ctx, **_):
         "max_trades_per_day": state.max_trades_per_day,
         "watched_symbols": state.watched_symbols,
     }
+
+
+def get_strategy_rationale(ctx, **_):
+    """The Higher High Breakout strategy's overview plus the WHY behind
+    each entry rule (trend filter, breakout buffer, higher-low, RSI
+    floor) and exit rule (take profit, stop loss, trailing stop,
+    momentum exit) -- strategy_knowledge.py's content, distinct from
+    get_strategy_config's numeric params/timeframe. Call this when asked
+    to explain the strategy's psychology/reasoning, not just cite its
+    numbers -- e.g. "why does it wait for a breakout instead of buying
+    the dip" or "what's the point of the RSI filter" need this, not
+    get_strategy_config. Static content (doesn't vary per symbol or
+    strategy version -- every version of Higher High Breakout shares the
+    same rule structure, just different numbers), so no DB/network call
+    here, unlike get_strategy_config."""
+    return strategy_knowledge.describe_strategy()
 
 
 def get_asset_market_data(ctx, symbol, asset_class=None, timeframe="1h", bars=20, **_):
@@ -431,6 +448,7 @@ TOOL_FUNCTIONS = {
     "get_recent_signals": get_recent_signals,
     "get_risk_state": get_risk_state,
     "get_strategy_config": get_strategy_config,
+    "get_strategy_rationale": get_strategy_rationale,
     "get_asset_market_data": get_asset_market_data,
     "get_broad_market_context": get_broad_market_context,
     "get_backtest_results": get_backtest_results,
@@ -451,6 +469,7 @@ TOOL_SCHEMAS = [
     {"name": "get_recent_signals", "description": "Get recent trade signals that were acted on (note: only executed signals are tracked, not rejected ones).", "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
     {"name": "get_risk_state", "description": "Get the live risk manager's halt status per asset class and today's running P&L.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_strategy_config", "description": "Get the current risk config, regime thresholds, watched symbols, and each symbol's actually-assigned strategy (name, version, params, and its timeframe/resolution -- e.g. 30m or 1h).", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_strategy_rationale", "description": "Get the Higher High Breakout strategy's overview and the reasoning/psychology behind each entry rule (trend filter, breakout buffer, higher-low, RSI floor) and exit rule (take profit, stop loss, trailing stop, momentum exit) -- the WHY, not just the numeric params get_strategy_config returns.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_asset_market_data", "description": "Get recent OHLCV price bars for a specific symbol.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}, "asset_class": {"type": "string", "enum": ["stock", "forex", "crypto"]}, "timeframe": {"type": "string", "enum": ["1m", "5m", "15m", "1h", "4h", "1d"]}, "bars": {"type": "integer"}}, "required": ["symbol"]}},
     {"name": "get_broad_market_context", "description": "Get a snapshot of major index/sector ETFs (SPY, QQQ, DIA, and key sector ETFs) as a proxy for overall market conditions.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_backtest_results", "description": "Get metrics (win rate, max drawdown, Sharpe) from the most recent backtest run, overall and broken out by market regime. Pass symbol to filter to one instrument.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}}}},

@@ -93,6 +93,52 @@ def test_webhook_valid_secret_places_order(client):
     assert last_trade["asset_class"] == "stock"
 
 
+def test_webhook_trade_pushes_a_discord_notification_with_the_explanation(client, monkeypatch):
+    """A real trade must proactively push its generated explanation to
+    Discord (alerts.post_trade_notification), not just log/persist it --
+    the whole point being someone doesn't have to open the dashboard or
+    ask Hermes after the fact to see why a trade happened."""
+    import server
+
+    calls = []
+    monkeypatch.setattr(
+        server.alerts, "post_trade_notification",
+        lambda *args: calls.append(args),
+    )
+
+    _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+
+    assert len(calls) == 1
+    action, symbol, asset_class, qty, price, pnl, explanation = calls[0]
+    assert action == "buy"
+    assert symbol == "AAPL"
+    assert asset_class == "stock"
+    assert explanation is not None
+
+
+def test_webhook_trade_still_succeeds_if_discord_notification_fails(client, monkeypatch):
+    """A Discord/notification failure must never be able to make an
+    already-executed trade look like it failed -- same rule as the
+    explanation generation and regime lookup right next to it."""
+    import server
+    import state
+
+    def broken_post_trade_notification(*args):
+        raise Exception("simulated Discord failure")
+
+    monkeypatch.setattr(server.alerts, "post_trade_notification", broken_post_trade_notification)
+
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+
+    assert resp.status_code == 202
+    assert state.trade_log[-1]["symbol"] == "AAPL"
+    assert state.trade_log[-1]["action"] == "buy"
+
+
 def test_webhook_entry_gets_a_fallback_explanation_when_no_bar_history(client):
     """The fake broker's default get_ohlcv() returns [] (no bars) -- the
     explanation generator must degrade gracefully to a clear fallback
@@ -312,6 +358,134 @@ def test_webhook_rejected_sell_rolls_back_dedup_stamp(client):
     })
     assert resp.status_code == 202  # queued -- the rejection itself happens in the background
     assert "AAPL_sell" not in state.last_signal_time
+
+
+# --- Overlapping-buy guard: "no new buy before the asset gets a chance
+# to sell" -- a buy must not pyramid an already-open position for the
+# SAME symbol. Sells already checked held_qty first (stock/crypto only
+# -- forex had NO check at all, for either buys or sells); this closes
+# the buy-side gap uniformly across stock, crypto, AND forex. ----------
+
+def test_webhook_buy_rejected_when_stock_symbol_already_holds_a_long(client, monkeypatch, caplog):
+    import server
+    import state
+
+    fake_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="31",
+        avg_entry_price="200.0", current_price="205.0", unrealized_pl="155.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    with caplog.at_level(logging.WARNING):
+        resp = _post_webhook_and_wait(client, {
+            "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+        })
+
+    assert resp.status_code == 202
+    assert not any(t["symbol"] == "AAPL" and t["action"] == "buy" for t in state.trade_log)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("already holds an open long position" in m for m in messages)
+
+
+def test_webhook_buy_rejected_when_crypto_symbol_already_holds_a_long(client, monkeypatch, caplog):
+    import server
+
+    fake_position = SimpleNamespace(
+        symbol="BTCUSD", asset_class="crypto", qty="0.1",
+        avg_entry_price="60000.0", current_price="61000.0", unrealized_pl="100.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    with caplog.at_level(logging.WARNING):
+        resp = _post_webhook_and_wait(client, {
+            "secret": "test-webhook-secret", "action": "buy", "symbol": "BTC/USD",
+        })
+
+    assert resp.status_code == 202
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("already holds an open long position" in m for m in messages)
+
+
+def test_webhook_buy_rejected_when_forex_symbol_already_holds_a_long(client, monkeypatch, caplog):
+    """Forex's equivalent of the two tests above -- this asset class
+    previously had NO existing-position check at all for either buys or
+    sells."""
+    import server
+
+    fake_oanda_position = {
+        "instrument": "GBP_JPY",
+        "long": {"units": "500", "averagePrice": "190.0", "unrealizedPL": "5.0"},
+        "short": {"units": "0", "unrealizedPL": "0"},
+    }
+    monkeypatch.setattr(server.oanda_broker, "get_positions", lambda: [fake_oanda_position])
+
+    with caplog.at_level(logging.WARNING):
+        resp = _post_webhook_and_wait(client, {
+            "secret": "test-webhook-secret", "action": "buy", "symbol": "GBP_JPY",
+        })
+
+    assert resp.status_code == 202
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("already holds an open long position" in m for m in messages)
+
+
+def test_webhook_buy_allowed_when_forex_symbol_holds_a_short(client, monkeypatch):
+    """Critical regression guard: a forex BUY when a SHORT is held is
+    closing/reducing it, not pyramiding -- the guard must NOT block this,
+    exactly like the stock/crypto sell-side check never blocks a sell
+    that's closing a long. Getting this wrong would make it impossible
+    to ever close a forex short via a buy signal again."""
+    import server
+    import state
+
+    fake_oanda_position = {
+        "instrument": "GBP_JPY",
+        "long": {"units": "0", "unrealizedPL": "0"},
+        "short": {"units": "-500", "averagePrice": "190.123", "unrealizedPL": "-12.50"},
+    }
+    monkeypatch.setattr(server.oanda_broker, "get_positions", lambda: [fake_oanda_position])
+
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "GBP_JPY",
+    })
+
+    assert resp.status_code == 202
+    last_trade = state.trade_log[-1]
+    assert last_trade["symbol"] == "GBP_JPY"
+    assert last_trade["action"] == "buy"
+
+
+def test_webhook_buy_still_allowed_when_nothing_is_held(client):
+    """Sanity/regression check: a completely normal first entry (no
+    existing position anywhere) must be entirely unaffected by this
+    guard."""
+    import state
+
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+    })
+
+    assert resp.status_code == 202
+    assert state.trade_log[-1]["symbol"] == "AAPL"
+    assert state.trade_log[-1]["action"] == "buy"
+
+
+def test_manual_trade_buy_is_also_blocked_by_the_overlapping_buy_guard(auth_client, monkeypatch):
+    """No is_manual carve-out -- matches the existing sell-side held-qty
+    check, which also doesn't exempt manual trades. An operator's manual
+    buy click must be rejected the same way an automated signal would be."""
+    import server
+
+    fake_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="31",
+        avg_entry_price="200.0", current_price="205.0", unrealized_pl="155.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    resp = auth_client.post("/api/manual_trade", json={"action": "buy", "symbol": "AAPL"})
+
+    assert resp.status_code == 400
+    assert "already has an open position" in resp.get_json()["error"]
 
 
 def test_webhook_duplicate_successful_signal_rejected_and_logged(client, monkeypatch, caplog):
@@ -752,6 +926,7 @@ def test_safety_net_force_close_and_webhook_signal_for_same_symbol_process_in_ar
     safety_net_started = threading.Event()
     release_safety_net = threading.Event()
     call_count = {"n": 0}
+    position_closed = {"value": False}
 
     def fake_place_order(symbol, side, size, order_type="market"):
         call_count["n"] += 1
@@ -759,6 +934,14 @@ def test_safety_net_force_close_and_webhook_signal_for_same_symbol_process_in_ar
             execution_order.append(("safety_net", side))
             safety_net_started.set()
             assert release_safety_net.wait(timeout=2), "test itself timed out releasing the safety net"
+            # The real broker would show this position gone once the
+            # close order fills -- the overlapping-buy guard checks
+            # get_positions() for the queued webhook buy right after
+            # this, so it must reflect that (a STATIC fake here would
+            # make the guard wrongly reject the webhook buy as
+            # pyramiding an "existing" position that's actually already
+            # closed).
+            position_closed["value"] = True
         else:
             execution_order.append(("webhook", side))
         return {"id": "fake-order-id", "status": "filled"}
@@ -769,7 +952,10 @@ def test_safety_net_force_close_and_webhook_signal_for_same_symbol_process_in_ar
         symbol="AAPL", asset_class="us_equity", qty="31",
         avg_entry_price="200.0", current_price="193.5", unrealized_pl="-200.0",
     )
-    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+    monkeypatch.setattr(
+        server.alpaca_broker, "get_positions",
+        lambda: [] if position_closed["value"] else [fake_position],
+    )
     monkeypatch.setattr(server.alpaca_broker, "place_order", fake_place_order)
 
     safety_net_thread = threading.Thread(target=server.run_position_safety_checks)
@@ -801,6 +987,7 @@ def test_manual_close_and_webhook_signal_for_same_symbol_process_in_arrival_orde
     manual_close_started = threading.Event()
     release_manual_close = threading.Event()
     call_count = {"n": 0}
+    position_closed = {"value": False}
 
     def fake_place_order(symbol, side, size, order_type="market"):
         call_count["n"] += 1
@@ -808,6 +995,10 @@ def test_manual_close_and_webhook_signal_for_same_symbol_process_in_arrival_orde
             execution_order.append(("manual_close", side))
             manual_close_started.set()
             assert release_manual_close.wait(timeout=2), "test itself timed out releasing the manual close"
+            # See the safety-net version of this test for why this needs
+            # to reflect the close before the queued webhook buy is
+            # processed -- the overlapping-buy guard checks get_positions().
+            position_closed["value"] = True
         else:
             execution_order.append(("webhook", side))
         return {"id": "fake-order-id", "status": "filled"}
@@ -816,7 +1007,10 @@ def test_manual_close_and_webhook_signal_for_same_symbol_process_in_arrival_orde
         symbol="AAPL", asset_class="us_equity", qty="31", qty_available="31",
         avg_entry_price="200.0", current_price="210.0", unrealized_pl="310.0",
     )
-    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+    monkeypatch.setattr(
+        server.alpaca_broker, "get_positions",
+        lambda: [] if position_closed["value"] else [fake_position],
+    )
     monkeypatch.setattr(server.alpaca_broker, "place_order", fake_place_order)
 
     # Plain (non-context-manager) test client -- `with app.test_client()`
@@ -1316,21 +1510,21 @@ def test_dust_crypto_positions_do_not_block_a_new_entry_via_webhook(client, monk
     assert state.trade_log[-1]["action"] == "buy"
 
 
-def test_real_crypto_positions_still_block_a_new_entry_via_webhook(client, monkeypatch, caplog):
-    """Same cap (3), same wiring, but REAL-sized positions -- must still
-    be correctly rejected. Proves the dust exclusion didn't quietly
-    loosen the cap for genuine exposure."""
+def test_real_crypto_position_blocks_a_new_entry_via_webhook(client, monkeypatch, caplog):
+    """A REAL (non-dust) BTC/USD position must block a further BTC/USD
+    buy. This used to be caught by the max_open_positions cap in this
+    exact scenario -- now the overlapping-buy guard (added for "no new
+    buy before the asset gets a chance to sell") catches it first, more
+    specifically and before max_open_positions is even consulted. Either
+    way, proves the dust exclusion (config.DUST_POSITION_VALUE_USD)
+    didn't quietly loosen protection for genuine exposure."""
     import server
 
-    real_positions = [
-        SimpleNamespace(symbol="BTCUSD", asset_class="crypto", qty="0.05",
-                         avg_entry_price="65226.83", current_price="65402.30", unrealized_pl="10.0"),
-        SimpleNamespace(symbol="ETHUSD", asset_class="crypto", qty="1.0",
-                         avg_entry_price="1930.66", current_price="1896.12", unrealized_pl="-30.0"),
-        SimpleNamespace(symbol="SOLUSD", asset_class="crypto", qty="10.0",
-                         avg_entry_price="78.32", current_price="77.74", unrealized_pl="-6.0"),
-    ]
-    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: real_positions)
+    real_position = SimpleNamespace(
+        symbol="BTCUSD", asset_class="crypto", qty="0.05",
+        avg_entry_price="65226.83", current_price="65402.30", unrealized_pl="10.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [real_position])
 
     with caplog.at_level(logging.WARNING):
         resp = _post_webhook_and_wait(client, {
@@ -1339,4 +1533,4 @@ def test_real_crypto_positions_still_block_a_new_entry_via_webhook(client, monke
 
     assert resp.status_code == 202  # queued regardless -- rejection happens in the background, see webhook()'s docstring
     messages = [r.getMessage() for r in caplog.records]
-    assert any("Max open positions reached for crypto" in m for m in messages)
+    assert any("already holds an open long position" in m for m in messages)

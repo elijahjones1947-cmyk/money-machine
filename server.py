@@ -1659,12 +1659,12 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
     # bot_enabled check above -- an operator explicitly acting, or an
     # emergency/administrative close, must never be blocked by this.
     #
-    # NOTE: this does allow an already-held dropped symbol to accept a
-    # same-direction ADD (not just a close) until its alert is actually
-    # disabled -- accepted tradeoff given how small a window that is and
-    # how small these positions are; not worth the complexity of
-    # distinguishing add-vs-reduce per asset class here (forex in
-    # particular has no existing notion of it outside a forced close).
+    # NOTE: a dropped-but-still-held symbol CAN still accept a same-
+    # direction add via this gate alone (already_held bypasses it) --
+    # but the overlapping-buy guard right below closes that specific
+    # case too now (an existing long blocks any further buy regardless
+    # of watchlist membership), so this is no longer the tradeoff it
+    # used to be before that guard existed.
     if not is_manual and not is_forced_close and symbol not in state.watched_symbols.get(asset_class, []):
         already_held = any(p['symbol'] == symbol for p in get_all_positions())
         if not already_held:
@@ -1674,6 +1674,42 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
                 )
             )
             return jsonify({'error': '{} is not currently watched'.format(symbol)}), 400
+    # Overlapping-buy guard: a new BUY must not pyramid an ALREADY-OPEN
+    # position for this exact symbol -- "no new buy before the asset
+    # gets a chance to sell." Stock/crypto never hold anything but long
+    # (this bot doesn't short them), so ANY existing position there
+    # unambiguously means pyramiding; forex can hold either direction,
+    # so only an existing LONG blocks a buy -- a held SHORT means this
+    # buy is closing/reducing it (the forex mirror of the stock/crypto
+    # sell-side held-qty check below, which never blocks a sell that's
+    # genuinely closing a long -- this guard must not either). Applies
+    # regardless of is_manual, same as that sell-side check: neither
+    # carves out manual trades. Forced closes are never a "buy to open"
+    # and are exempt entirely.
+    #
+    # Dust-valued positions (config.DUST_POSITION_VALUE_USD, same
+    # threshold the max_open_positions cap exclusion uses) don't count
+    # here either -- a leftover rounding artifact from an imprecise
+    # fill/close isn't a real open position blocking anything, same
+    # reasoning as that cap fix, kept consistent so dust never
+    # functionally blocks trading capacity anywhere in this system.
+    if not is_forced_close and action == 'buy':
+        existing_position = next((p for p in get_all_positions() if p['symbol'] == symbol), None)
+        existing_value = (
+            existing_position['qty'] * existing_position['avg_entry'] if existing_position else 0
+        )
+        if (
+            existing_position is not None
+            and existing_position['direction'] == 'long'
+            and existing_value >= config.DUST_POSITION_VALUE_USD
+        ):
+            logging.warning(
+                'Rejected buy {} {}: already holds an open long position ({} units, ${:.2f}) -- '
+                'no new entry until it closes'.format(asset_class, symbol, existing_position['qty'], existing_value)
+            )
+            return jsonify({
+                'error': '{} already has an open position -- no new entry until it closes'.format(symbol),
+            }), 400
     if state.trades_today[asset_class] >= state.max_trades_per_day[asset_class] and not is_manual and not is_forced_close:
         logging.warning('Rejected {} {} {}: max trades/day reached ({})'.format(action, asset_class, symbol, state.max_trades_per_day[asset_class]))
         return jsonify({'error': 'max {} trades reached for today'.format(asset_class)}), 400
@@ -1929,6 +1965,17 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
             # Trade already executed on the broker — a DB hiccup here should
             # never look like the trade itself failed. Log and move on.
             logging.error('Trade succeeded but failed to persist to DB: {}'.format(e))
+
+        # Proactive Discord push (alerts.py) of this trade's explanation --
+        # reuses the same webhook/best-effort pattern as every other alert
+        # in that module (silently no-ops if DISCORD_ALERT_WEBHOOK_URL
+        # isn't set, never raises on its own), but wrapped here too since
+        # a trade succeeding must never be put at risk by a notification
+        # side-effect, same rule as the explanation/regime lookups above.
+        try:
+            alerts.post_trade_notification(action, symbol, asset_class, size, price, pnl, explanation)
+        except Exception as e:
+            logging.warning('Could not post trade notification to Discord for {} {} {}: {}'.format(action, asset_class, symbol, e))
 
         if pnl is not None:
             try:

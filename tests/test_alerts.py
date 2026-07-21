@@ -415,3 +415,89 @@ def test_broker_errors_clears_once_window_ages_out():
     alerts.check_and_alert_broker_errors()
     assert state.alerted_broker_errors is False
     assert state.broker_error_timestamps == []
+
+
+# --- post_trade_notification (proactive per-trade Discord push) --------
+
+class _FakeDiscordResponse:
+    status_code = 204
+    text = ""
+
+
+def _capture_discord_post(monkeypatch, calls):
+    """Configures a fake DISCORD_ALERT_WEBHOOK_URL and a requests.post
+    stub that records every call instead of hitting the network -- same
+    pattern as _capture_github_post above, for Discord."""
+    import requests
+    monkeypatch.setattr(config, "DISCORD_ALERT_WEBHOOK_URL", "https://fake-discord-webhook-for-tests.invalid")
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append({"url": url, "json": json})
+        return _FakeDiscordResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+
+def test_post_trade_notification_includes_action_symbol_and_explanation(monkeypatch):
+    calls = []
+    _capture_discord_post(monkeypatch, calls)
+
+    alerts.post_trade_notification("buy", "AAPL", "stock", 31, 210.0, None, "Entered long: broke the 7-bar high.")
+
+    assert len(calls) == 1
+    embed = calls[0]["json"]["embeds"][0]
+    assert embed["title"] == "BUY AAPL"
+    assert "31 AAPL @ 210.0" in embed["description"]
+    assert "Entered long: broke the 7-bar high." in embed["description"]
+
+
+def test_post_trade_notification_includes_pnl_for_exits(monkeypatch):
+    calls = []
+    _capture_discord_post(monkeypatch, calls)
+
+    alerts.post_trade_notification("sell", "AAPL", "stock", 31, 220.0, 310.0, "Exited: take profit hit.")
+
+    embed = calls[0]["json"]["embeds"][0]
+    assert "P&L: +310.00" in embed["description"]
+
+
+def test_post_trade_notification_omits_pnl_line_for_entries(monkeypatch):
+    """Entries pass pnl=None (a position just opened has no P&L yet) --
+    must not print a nonsensical 'P&L: None' line."""
+    calls = []
+    _capture_discord_post(monkeypatch, calls)
+
+    alerts.post_trade_notification("buy", "AAPL", "stock", 31, 210.0, None, "Entered long.")
+
+    embed = calls[0]["json"]["embeds"][0]
+    assert "P&L" not in embed["description"]
+
+
+def test_post_trade_notification_color_distinct_from_alert_red():
+    """Every OTHER alert in this module is red (0xE74C3C) for "something's
+    wrong" -- a routine trade must not visually read as an incident in
+    the same Discord channel."""
+    assert alerts._TRADE_NOTIFICATION_COLOR != 0xE74C3C
+
+
+def test_post_trade_notification_is_a_noop_without_a_configured_url(monkeypatch):
+    """Same best-effort, no-crash pattern as every other alert -- silently
+    does nothing if DISCORD_ALERT_WEBHOOK_URL isn't set."""
+    import requests
+    calls = []
+    monkeypatch.setattr(requests, "post", lambda *a, **k: calls.append((a, k)))
+    alerts.post_trade_notification("buy", "AAPL", "stock", 1, 100.0, None, "explanation")
+    assert calls == []
+
+
+def test_post_trade_notification_never_raises_on_a_failed_post(monkeypatch):
+    """A Discord outage must never be able to look like the trade itself
+    failed -- same rule as every other side-channel in this codebase."""
+    import requests
+    monkeypatch.setattr(config, "DISCORD_ALERT_WEBHOOK_URL", "https://fake-discord-webhook-for-tests.invalid")
+
+    def raising_post(*a, **k):
+        raise requests.RequestException("simulated network failure")
+
+    monkeypatch.setattr(requests, "post", raising_post)
+    alerts.post_trade_notification("buy", "AAPL", "stock", 1, 100.0, None, "explanation")  # must not raise
