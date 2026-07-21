@@ -613,6 +613,55 @@ def _get_held_qty(broker, symbol):
     return 0.0
 
 
+def _get_held_forex_position(broker, symbol):
+    """Forex equivalent of _get_held_qty above -- (qty, direction) for
+    `symbol` on an OANDA-backed broker, or (0.0, None) if the bot
+    doesn't currently hold a position in it. Used to gate forex exits
+    (a sell closing a long, a buy closing a short) to what's actually
+    held, same reasoning as the stock/crypto sell-side check above:
+    without this, a stale exit signal for a symbol that's already flat
+    (e.g. already force-closed by run_position_safety_checks,
+    run_intrabar_exit_checks, or anything else) would size and place a
+    FRESH order instead of being rejected -- reopening a position the
+    signal never actually intended to open. Confirmed live: a stale
+    forex sell landing more than 60s after an automatic close (past the
+    dedup window) previously proceeded straight to sizing.
+
+    A separate function from _get_held_qty rather than a shared one --
+    that one's return type (a bare qty) and Alpaca-specific position
+    parsing don't fit forex's bidirectional (long OR short) shape, and
+    its one call site is a real, already-incident-tested path not worth
+    risking a change to for this.
+
+    Retries get_positions() once if the symbol isn't found on the first
+    read, same defensive reasoning as _get_held_qty's own retry (a
+    transient gap in a broker's own position data looking identical to
+    genuinely holding nothing) -- OANDA hasn't shown this exact issue
+    live yet, but there's no reason to assume it's immune to the same
+    class of problem Alpaca already demonstrated."""
+    def _find(positions):
+        for p in positions:
+            if p.get('instrument') != symbol:
+                continue
+            long_units = float(p.get('long', {}).get('units', 0))
+            short_units = float(p.get('short', {}).get('units', 0))
+            if long_units != 0:
+                return abs(long_units), 'long'
+            if short_units != 0:
+                return abs(short_units), 'short'
+        return None
+
+    try:
+        result = _find(broker.get_positions())
+        if result is None:
+            result = _find(broker.get_positions())
+        if result is not None:
+            return result
+    except BrokerConnectionError as e:
+        logging.warning("Could not check held position for {}: {}".format(symbol, e))
+    return 0.0, None
+
+
 def _compute_current_signal(broker, symbol, asset_class, params=None):
     """Fetches recent OHLCV and returns backtest.strategy.compute_signals()'s
     LATEST per-bar signal dict for `symbol` right now, or None if there
@@ -1925,21 +1974,60 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
             if size <= 0:
                 logging.warning('Rejected {} crypto {}: position too small (risk_amount={:.2f}, price={:.2f})'.format(action, symbol, risk_amount, price))
                 return jsonify({'error': 'position too small'}), 400
-        else:
-            # Forex units = risk_amount / price (same principle as stock
-            # shares and crypto quantity). Floor to a whole unit — forex
-            # position sizes are conventionally whole units, and flooring
-            # (not rounding-to-nearest) guarantees position_value never
-            # exceeds the risk manager's cap due to rounding.
-            #
-            # NOTE: this still doesn't account for pip value or standard
-            # lot-size conventions (micro/mini/standard lots) — it treats
-            # 1 unit as 1 unit of the base currency. Fine for testing;
-            # revisit before sizing real forex positions for live trading.
-            size = math.floor(risk_amount / price)
-            if size < 1:
-                logging.warning('Rejected {} forex {}: position too small (risk_amount={:.2f}, price={:.2f})'.format(action, symbol, risk_amount, price))
-                return jsonify({'error': 'position too small'}), 400
+        elif asset_class == 'forex':
+            # Forex can hold either direction (unlike stock/crypto,
+            # always long here), so a bare action alone doesn't say
+            # whether this is an exit or a new entry -- check what's
+            # actually held first, same reasoning as the stock/crypto
+            # sell-side check above, generalized for both directions:
+            held_qty, held_direction = _get_held_forex_position(broker, symbol)
+            if action == 'sell' and held_direction == 'long':
+                # Closing an existing long.
+                size = held_qty
+                reduces_position = True
+            elif action == 'sell':
+                # No long held to close. The strategy this bot runs
+                # (Higher High Breakout -- backtest/strategy.py's
+                # compute_signals()) has no short-entry logic at all,
+                # only a long entry (buy_condition) and a momentum-EXIT
+                # signal (sell_signal) -- so a real, correctly-firing
+                # alert for this strategy NEVER sends a sell meaning
+                # "open/add a short". A sell with nothing to close is
+                # therefore always stale or mistaken, and must be
+                # rejected here rather than blindly executed as a fresh
+                # short -- this is the exact gap that let a stale exit
+                # signal reopen a position after
+                # run_intrabar_exit_checks() (or anything else) already
+                # closed it, confirmed live with more than 60s between
+                # the two (past the dedup window above).
+                logging.warning('Rejected sell forex {}: bot holds no long position to sell'.format(symbol))
+                return jsonify({'error': 'no long position to sell for {} (bot holds none)'.format(symbol)}), 400
+            elif action == 'buy' and held_direction == 'short':
+                # Closing an existing short -- mirrors
+                # run_position_safety_checks'/manual_close's own
+                # direction-aware close_action logic, which already
+                # assumes a buy can close a forex short.
+                size = held_qty
+                reduces_position = True
+            else:
+                # Genuine new entry (a buy opening/adding to a long --
+                # the strategy's actual, intended entry signal). Units =
+                # risk_amount / price (same principle as stock shares
+                # and crypto quantity). Floor to a whole unit — forex
+                # position sizes are conventionally whole units, and
+                # flooring (not rounding-to-nearest) guarantees
+                # position_value never exceeds the risk manager's cap
+                # due to rounding.
+                #
+                # NOTE: this still doesn't account for pip value or
+                # standard lot-size conventions (micro/mini/standard
+                # lots) — it treats 1 unit as 1 unit of the base
+                # currency. Fine for testing; revisit before sizing real
+                # forex positions for live trading.
+                size = math.floor(risk_amount / price)
+                if size < 1:
+                    logging.warning('Rejected {} forex {}: position too small (risk_amount={:.2f}, price={:.2f})'.format(action, symbol, risk_amount, price))
+                    return jsonify({'error': 'position too small'}), 400
 
         # Dust positions (rounding leftovers from an imprecise fill/close,
         # not real capital at risk -- see config.DUST_POSITION_VALUE_USD)

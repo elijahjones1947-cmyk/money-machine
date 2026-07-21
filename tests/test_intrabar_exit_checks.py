@@ -10,12 +10,13 @@ Covers: the live peak-price tracker (state.peak_price_since_entry),
 static TP/SL crossings, the trailing-stop's actual trail-then-fire
 behavior (not just a static level), uniformity across stock/crypto/forex,
 and the race between this job force-closing a position and a later
-TradingView bar-close exit signal for the same symbol arriving anyway
-(confirmed, not assumed, per asset class -- see the forex-specific
-tests, which demonstrate a real pre-existing gap this feature does NOT
-close on its own).
+TradingView bar-close exit signal for the same symbol arriving anyway --
+confirmed clean for all three asset classes, including forex, which
+initially had no held-qty check at all (see _get_held_forex_position in
+server.py, added specifically to close that gap).
 """
 
+import logging
 import time
 from types import SimpleNamespace
 
@@ -344,11 +345,11 @@ def test_stock_webhook_exit_after_intrabar_close_cleanly_no_ops(client, monkeypa
 
 
 def test_forex_webhook_exit_after_intrabar_close_within_dedup_window_is_dropped(client, monkeypatch):
-    """Forex has NO held-qty check at all (unlike stock/crypto) -- but
-    within the 60s dedup window, the stale exit signal happens to be
-    caught as a duplicate of the poller's own stamp instead. This is
-    INCIDENTAL protection, not a real held-qty guard -- see the next
-    test for what happens once that window passes."""
+    """Within the 60s dedup window, the stale exit signal is caught as a
+    duplicate of the poller's own stamp before it ever reaches the
+    held-qty check below -- still a clean no-op, just via a different
+    mechanism than the one the next test exercises (which covers what
+    happens once that window has passed)."""
     import server
     import state
 
@@ -387,17 +388,15 @@ def test_forex_webhook_exit_after_intrabar_close_within_dedup_window_is_dropped(
     assert len(state.trade_log) == trades_so_far  # dropped as a duplicate -- not a held-qty rejection
 
 
-def test_forex_webhook_exit_after_intrabar_close_beyond_dedup_window_reopens_a_position(client, monkeypatch):
-    """CONFIRMS (not assumes) a real, pre-existing gap: once the 60s
-    dedup window has passed, a stale forex exit signal for a symbol the
-    poller already closed does NOT cleanly no-op -- forex sells have no
-    held-qty check, so it proceeds to size and place a brand new sell
-    order, reopening a short. Not introduced by this feature (it already
-    existed for any two forex signals 60s+ apart on the same symbol) --
-    reconfirmed here specifically because the poller is a new source of
-    exactly the "an exit already happened that TradingView doesn't know
-    about" scenario, and Eli asked this be verified rather than assumed
-    to carry over."""
+def test_forex_webhook_exit_after_intrabar_close_beyond_dedup_window_cleanly_no_ops(client, monkeypatch, caplog):
+    """The gap this was fixed for: once the 60s dedup window has passed
+    (a bar-close alert can easily arrive minutes after an intrabar poll
+    fires -- polls run every 20s, bars close every 30m), the dedup drop
+    above no longer protects a stale forex exit signal. Before
+    _get_held_forex_position existed, this would have proceeded straight
+    to sizing and placed a brand new sell order, reopening a short --
+    now it's rejected the same way stock/crypto's sell-side check
+    already rejects a sell with nothing to close."""
     import server
     import state
 
@@ -428,16 +427,16 @@ def test_forex_webhook_exit_after_intrabar_close_beyond_dedup_window_reopens_a_p
     webhook_queue.wait_for_idle("GBP_JPY")
     assert len(orders) == 1  # the poller's own close
 
-    # Simulate the dedup window having already expired -- a bar-close
-    # alert arriving several minutes after an intrabar poll fired is
-    # entirely plausible (polls run every 20s; bars close every 30m).
+    # Simulate the dedup window having already expired.
     state.last_signal_time["GBP_JPY_sell"] = time.time() - 61
 
-    resp = client.post("/webhook", json={
-        "secret": "test-webhook-secret", "action": "sell", "symbol": "GBP_JPY",
-    })
-    webhook_queue.wait_for_idle("GBP_JPY")
+    with caplog.at_level(logging.WARNING):
+        resp = client.post("/webhook", json={
+            "secret": "test-webhook-secret", "action": "sell", "symbol": "GBP_JPY",
+        })
+        webhook_queue.wait_for_idle("GBP_JPY")
 
     assert resp.status_code == 202
-    assert len(orders) == 2  # the stale signal placed a SECOND real order
-    assert orders[1][1] == "sell"
+    assert len(orders) == 1  # NOT a second order -- cleanly rejected instead
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("no long position to sell" in m for m in messages)
