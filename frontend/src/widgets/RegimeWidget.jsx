@@ -1,10 +1,10 @@
 import { useDashboard } from '../hooks/useDashboard.js';
 
 const REGIME_COLOR = {
-  trending: 'var(--accent)',
-  choppy: 'var(--warning)',
-  volatile: 'var(--danger)',
-  unknown: 'var(--text-muted)',
+  trending: 'var(--regime-trending)',
+  choppy: 'var(--regime-choppy)',
+  volatile: 'var(--regime-volatile)',
+  unknown: 'var(--regime-unknown)',
 };
 
 export function RegimeWidget() {

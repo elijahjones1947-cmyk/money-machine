@@ -13,6 +13,19 @@
   --radius-sm: 8px;
   --radius-md: 14px;
   --radius-lg: 20px;
+
+  /* Fixed traffic-light tones for market regime, deliberately NOT
+     theme-tinted (unlike --accent, which is purple in the "soft"
+     theme) -- regime state should read as green/yellow/red regardless
+     of which theme is active. */
+  --regime-trending: #2ecc71;
+  --regime-trending-dim: #2ecc7126;
+  --regime-choppy: #f1c40f;
+  --regime-choppy-dim: #f1c40f26;
+  --regime-volatile: #e74c3c;
+  --regime-volatile-dim: #e74c3c26;
+  --regime-unknown: #7c8b9a;
+  --regime-unknown-dim: #7c8b9a26;
 }
 
 [data-theme='neon'] {

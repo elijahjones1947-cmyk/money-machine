@@ -6,34 +6,17 @@ import { BacktestWidget } from './BacktestWidget.jsx';
 import { HermesControlWidget } from './HermesControlWidget.jsx';
 import { EquityWidget } from './EquityWidget.jsx';
 
-// Single source of truth for every widget the dashboard grid and the
-// edit-mode tray both know about: id, display title, its summary
-// component, the detail page route it taps through to (null = no detail
-// page, e.g. Hermes control per the roadmap), and a default grid size.
+// Single source of truth for every widget the dashboard grid knows
+// about: id, display title, its summary component, and the detail page
+// route it taps through to (null = no detail page, e.g. Hermes control).
 export const WIDGET_REGISTRY = {
-  positions: { title: 'Positions', Component: PositionsWidget, to: '/positions', defaultSize: { w: 3, h: 4 } },
-  risk: { title: 'Risk state', Component: RiskWidget, to: '/risk', defaultSize: { w: 3, h: 4 } },
-  tradelog: { title: 'Trade log', Component: TradeLogWidget, to: '/trades', defaultSize: { w: 3, h: 4 } },
-  regime: { title: 'Regime', Component: RegimeWidget, to: '/regime', defaultSize: { w: 3, h: 4 } },
-  backtest: { title: 'Backtest & live', Component: BacktestWidget, to: '/backtest', defaultSize: { w: 3, h: 4 } },
-  hermes: { title: 'Hermes', Component: HermesControlWidget, to: null, defaultSize: { w: 3, h: 4 } },
-  equity: { title: 'Equity', Component: EquityWidget, to: '/equity', defaultSize: { w: 3, h: 4 } },
+  positions: { title: 'Positions', Component: PositionsWidget, to: '/positions' },
+  risk: { title: 'Halt status', Component: RiskWidget, to: '/risk' },
+  tradelog: { title: 'Trade log', Component: TradeLogWidget, to: '/trades' },
+  regime: { title: 'Regime', Component: RegimeWidget, to: '/regime' },
+  backtest: { title: 'Backtest & live', Component: BacktestWidget, to: '/backtest' },
+  hermes: { title: 'Hermes', Component: HermesControlWidget, to: null },
+  equity: { title: 'Equity', Component: EquityWidget, to: '/equity' },
 };
 
 export const DEFAULT_WIDGET_IDS = ['equity', 'positions', 'risk', 'tradelog', 'regime', 'backtest', 'hermes'];
-
-export function defaultLayout() {
-  const cols = 12;
-  let x = 0;
-  let y = 0;
-  return DEFAULT_WIDGET_IDS.map((id) => {
-    const { w, h } = WIDGET_REGISTRY[id].defaultSize;
-    if (x + w > cols) {
-      x = 0;
-      y += h;
-    }
-    const item = { i: id, x, y, w, h };
-    x += w;
-    return item;
-  });
-}

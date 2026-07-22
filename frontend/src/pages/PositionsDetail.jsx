@@ -1,6 +1,7 @@
 import { Fragment, useState } from 'react';
 import { useDashboard } from '../hooks/useDashboard.js';
 import { api } from '../api.js';
+import { TrajectoryBar } from '../components/TrajectoryBar.jsx';
 
 export function PositionsDetail() {
   const { data, loading, refetch } = useDashboard();
@@ -69,7 +70,7 @@ export function PositionsDetail() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>Symbol</th><th>Asset class</th><th>Qty</th><th>Avg entry</th><th>Current price</th><th>Unrealized P&amp;L</th><th>Why</th><th>Manual close</th>
+                <th>Symbol</th><th>Asset class</th><th>Qty</th><th>Avg entry</th><th>Current price</th><th>Unrealized P&amp;L</th><th>Trajectory</th><th>Why</th><th>Manual close</th>
               </tr>
             </thead>
             <tbody>
@@ -85,6 +86,9 @@ export function PositionsDetail() {
                       <td>{p.current_price}</td>
                       <td style={{ color: p.unrealized_pl >= 0 ? 'var(--accent)' : 'var(--danger)', fontWeight: 600 }}>
                         {p.unrealized_pl >= 0 ? '+' : ''}{p.unrealized_pl}
+                      </td>
+                      <td>
+                        <TrajectoryBar avgEntry={p.avg_entry} currentPrice={p.current_price} unrealizedPl={p.unrealized_pl} qty={p.qty} />
                       </td>
                       <td>
                         {entry?.explanation ? (
@@ -116,7 +120,7 @@ export function PositionsDetail() {
                     </tr>
                     {expandedSymbol === p.symbol && entry?.explanation && (
                       <tr>
-                        <td colSpan={8} style={{ background: 'var(--bg)', fontSize: 13, color: 'var(--text-secondary)', padding: '10px 12px' }}>
+                        <td colSpan={9} style={{ background: 'var(--bg)', fontSize: 13, color: 'var(--text-secondary)', padding: '10px 12px' }}>
                           {entry.explanation}
                         </td>
                       </tr>

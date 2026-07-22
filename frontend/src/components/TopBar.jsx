@@ -3,6 +3,7 @@ import { useDashboard } from '../hooks/useDashboard.js';
 import { useAuth } from '../context/AuthContext.jsx';
 import { api } from '../api.js';
 import { ThemeSwitcher } from './ThemeSwitcher.jsx';
+import { ModeToggle } from './ModeToggle.jsx';
 import './TopBar.css';
 
 export function TopBar({ theme, onThemeChange }) {
@@ -17,10 +18,13 @@ export function TopBar({ theme, onThemeChange }) {
   return (
     <div className="topbar">
       <div className="topbar-left">
+        <Link to="/settings" className="hamburger-btn" aria-label="Settings" title="Settings">
+          <span />
+          <span />
+          <span />
+        </Link>
         <Link to="/dashboard" className="topbar-logo">Rent Generator</Link>
-        {data && (
-          <span className={`mode-pill ${data.trading_mode === 'live' ? 'live' : ''}`}>{data.trading_mode}</span>
-        )}
+        {data && <ModeToggle mode={data.trading_mode} />}
       </div>
       <div className="topbar-right">
         <ThemeSwitcher theme={theme} onChange={onThemeChange} />
@@ -34,7 +38,6 @@ export function TopBar({ theme, onThemeChange }) {
           {data?.bot_enabled ? 'Pause' : 'Resume'}
         </button>
         <Link to="/strategies" className="button">Strategies</Link>
-        <Link to="/settings" className="button">Settings</Link>
         <button className="button" onClick={logout}>Log out</button>
       </div>
     </div>

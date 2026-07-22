@@ -8,7 +8,7 @@ export function RiskDetail() {
     <div>
       <div className="page-header">
         <div>
-          <h1>Risk state</h1>
+          <h1>Halt status</h1>
           <div className="page-subtitle">Live halt status per asset class and account-wide.</div>
         </div>
       </div>

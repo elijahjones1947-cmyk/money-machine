@@ -70,8 +70,4 @@ export const api = {
     request('/api/hermes/chat', { method: 'POST', body: JSON.stringify({ message }) }),
   hermesConfirm: (confirm) =>
     request('/api/hermes/confirm', { method: 'POST', body: JSON.stringify({ confirm }) }),
-
-  getLayout: () => request('/ui/layout'),
-  saveLayout: (layout) =>
-    request('/ui/layout', { method: 'POST', body: JSON.stringify(layout) }),
 };

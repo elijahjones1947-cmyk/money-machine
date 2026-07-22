@@ -955,6 +955,9 @@ def api_dashboard():
                 'symbol': sym,
                 'asset_class': asset_class,
                 'regime': r['regime'] if r else 'unknown',
+                'adx': r['adx'] if r else None,
+                'bb_width_pct': r['volatility'] if r else None,
+                'recorded_at': r['recorded_at'].isoformat() if r and r.get('recorded_at') else None,
             })
 
     return jsonify({
@@ -2257,9 +2260,13 @@ def _compute_live_performance():
         return {
             'overall': {'trade_count': 0, 'win_rate_pct': None, 'max_drawdown_pct': None, 'sharpe_ratio': None, 'total_pnl_abs': 0.0, 'avg_pnl_pct': None},
             'by_regime': {},
+            'by_asset_class': {},
+            'today': {'trade_count': 0, 'win_rate_pct': None, 'total_pnl_abs': 0.0},
             'trade_count': 0,
             'window_note': 'No closed trades yet.',
         }
+
+    today_str = datetime.date.today().isoformat()
 
     tagged_trades = []
     for t in closed:
@@ -2273,6 +2280,9 @@ def _compute_live_performance():
             'pnl_abs': pnl_abs,
             'pnl_pct': pnl_pct,
             'regime': t.get('regime') or 'unknown',
+            'asset_class': t.get('asset_class') or 'unknown',
+            'symbol': t.get('symbol') or 'unknown',
+            'is_today': isinstance(t.get('time'), str) and t['time'][:10] == today_str,
         })
 
     # Back into an implied starting capital (equity right before the
@@ -2289,6 +2299,29 @@ def _compute_live_performance():
     metrics['trade_count'] = len(tagged_trades)
     metrics['initial_capital'] = round(initial_capital, 2)
     metrics['window_note'] = 'Based on the last {} closed trades kept in the trade log.'.format(len(tagged_trades))
+
+    # Per-asset-class (and per-symbol within each class) breakdown -- same
+    # metrics methodology, just grouped differently, so the Backtest page
+    # can show the bot's actual live performance broken out "per asset
+    # per asset class" instead of one flat overall number.
+    by_asset_class = {}
+    for ac in sorted(set(t['asset_class'] for t in tagged_trades)):
+        class_trades = [t for t in tagged_trades if t['asset_class'] == ac]
+        class_metrics = compute_metrics(class_trades, initial_capital=initial_capital)
+        class_metrics['by_symbol'] = {
+            sym: compute_metrics([t for t in class_trades if t['symbol'] == sym], initial_capital=initial_capital)['overall']
+            for sym in sorted(set(t['symbol'] for t in class_trades))
+        }
+        by_asset_class[ac] = class_metrics
+    metrics['by_asset_class'] = by_asset_class
+
+    todays_trades = [t for t in tagged_trades if t['is_today']]
+    today_wins = [t for t in todays_trades if t['pnl_abs'] > 0]
+    metrics['today'] = {
+        'trade_count': len(todays_trades),
+        'win_rate_pct': round(len(today_wins) / len(todays_trades) * 100, 2) if todays_trades else None,
+        'total_pnl_abs': round(sum(t['pnl_abs'] for t in todays_trades), 2),
+    }
     return metrics
 
 

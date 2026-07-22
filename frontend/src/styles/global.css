@@ -44,22 +44,83 @@ button {
   letter-spacing: -0.02em;
 }
 
-.mode-pill {
+/* --- Left-side hamburger button: sole entry point to Settings --- */
+.hamburger-btn {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 4px;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.hamburger-btn:hover {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.hamburger-btn span {
+  display: block;
+  width: 16px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--text-primary);
+}
+
+/* --- Paper/live mode indicator: sliding-toggle look, display-only --- */
+.mode-toggle {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  width: 108px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  cursor: default;
+  user-select: none;
+}
+
+.mode-toggle-label {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: var(--bg-card);
-  color: var(--text-secondary);
-  border: 1px solid var(--border);
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  transition: color 0.2s ease;
 }
 
-.mode-pill.live {
+.mode-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: calc(50% - 2px);
+  height: calc(100% - 4px);
+  border-radius: 999px;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  transition: transform 0.25s ease, background 0.25s ease, border-color 0.25s ease;
+}
+
+.mode-toggle-paper .mode-toggle-label:first-child { color: var(--accent); }
+
+.mode-toggle-live .mode-toggle-thumb {
+  transform: translateX(100%);
   background: var(--danger-dim);
-  color: var(--danger);
   border-color: var(--danger);
 }
+
+.mode-toggle-live .mode-toggle-label:last-child { color: var(--danger); }
 
 .page-content {
   flex: 1;
@@ -452,42 +513,233 @@ table.data-table td {
   font-variant-numeric: tabular-nums;
 }
 
-/* --- Calendar heatmap --- */
-.heatmap-wrap {
+/* --- Daily P&L strip (simplified replacement for the old calendar heatmap) --- */
+.daily-pnl-strip {
   display: flex;
-  gap: 3px;
-  overflow-x: auto;
-  padding-bottom: 4px;
+  gap: 6px;
+  align-items: flex-end;
+  height: 90px;
 }
 
-.heatmap-col {
+.daily-pnl-bar-col {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-}
-
-.heatmap-cell {
-  width: 13px;
-  height: 13px;
-  border-radius: 3px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-}
-
-.heatmap-cell[data-level='win-1'] { background: var(--accent-dim); border-color: transparent; }
-.heatmap-cell[data-level='win-2'] { background: color-mix(in srgb, var(--accent) 55%, var(--bg-card)); border-color: transparent; }
-.heatmap-cell[data-level='win-3'] { background: var(--accent); border-color: transparent; }
-.heatmap-cell[data-level='loss-1'] { background: var(--danger-dim); border-color: transparent; }
-.heatmap-cell[data-level='loss-2'] { background: color-mix(in srgb, var(--danger) 55%, var(--bg-card)); border-color: transparent; }
-.heatmap-cell[data-level='loss-3'] { background: var(--danger); border-color: transparent; }
-
-.heatmap-legend {
-  display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  flex: 1;
+  height: 100%;
+}
+
+.daily-pnl-bar-track {
+  flex: 1;
+  width: 100%;
+  max-width: 22px;
+  display: flex;
+  align-items: flex-end;
+}
+
+.daily-pnl-bar-fill {
+  width: 100%;
+  border-radius: 4px 4px 2px 2px;
+  transition: height 0.2s ease;
+}
+
+.daily-pnl-bar-fill[data-state='win'] { background: var(--accent); }
+.daily-pnl-bar-fill[data-state='loss'] { background: var(--danger); }
+.daily-pnl-bar-fill[data-state='empty'] { background: var(--bg-elevated); }
+
+.daily-pnl-bar-label {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* --- Market regime page: live color-coded infographic cards --- */
+.regime-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+.regime-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.regime-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.regime-card-symbol {
+  font-size: 17px;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+}
+
+.regime-card-class {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: capitalize;
+}
+
+.regime-card-badge {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #05070a;
+  padding: 3px 9px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.regime-card-gauges {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.regime-gauge-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.regime-gauge-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.regime-gauge-track {
+  position: relative;
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: 3px;
+  overflow: visible;
+}
+
+.regime-gauge-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.regime-gauge-threshold {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--text-primary);
+  opacity: 0.5;
+}
+
+.regime-card-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 11px;
   color: var(--text-muted);
-  margin-top: 10px;
+}
+
+.regime-card-footer span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Positions page trajectory infographic: heaven (winning) / hell
+   (losing) two-state motif, scaffolding for a future full re-skin --- */
+.trajectory {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 130px;
+}
+
+.trajectory-track {
+  position: relative;
+  height: 16px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.trajectory-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  border-radius: 8px 2px 2px 8px;
+  transition: width 0.3s ease;
+}
+
+.trajectory-heaven .trajectory-fill {
+  background: linear-gradient(90deg, #ffe28a, #fff6d6, #9cffc0);
+  box-shadow: 0 0 10px 1px rgba(255, 226, 138, 0.5);
+}
+
+.trajectory-hell .trajectory-fill {
+  background: linear-gradient(90deg, #3a0a0a, #7a1414, #ff4d4d);
+  box-shadow: 0 0 10px 1px rgba(255, 30, 30, 0.35);
+}
+
+.trajectory-glyph {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.trajectory-heaven .trajectory-glyph { color: #b8860b; }
+.trajectory-hell .trajectory-glyph { color: #ffb3b3; }
+
+.trajectory-caption {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.trajectory-heaven .trajectory-caption { color: #d4af37; }
+.trajectory-hell .trajectory-caption { color: var(--danger); }
+
+/* --- Trade log "All trades" filter bar --- */
+.trade-log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.trade-log-filter-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.trade-log-symbol-filter {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  min-width: 180px;
 }
 
 .hermes-summary-card {

@@ -11,7 +11,7 @@ export function RiskWidget() {
 
   return (
     <div className="metric">
-      <span className="metric-label">Risk state</span>
+      <span className="metric-label">Halt status</span>
       <span className={`metric-value ${anyHalted ? 'negative' : 'positive'}`} style={{ fontSize: 28 }}>
         {risk.account_halted ? 'Account halted' : anyHalted ? 'Partial halt' : 'All clear'}
       </span>

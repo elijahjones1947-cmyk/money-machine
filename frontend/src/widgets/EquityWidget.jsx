@@ -21,7 +21,7 @@ export function EquityWidget() {
 
   return (
     <div className="metric">
-      <span className="metric-label">Combined equity</span>
+      <span className="metric-label">Total mark</span>
       <span className="metric-value">{equity != null ? `$${equity.toLocaleString()}` : '—'}</span>
       {change != null && (
         <span className={change >= 0 ? 'metric-value positive' : 'metric-value negative'} style={{ fontSize: 13, fontWeight: 600 }}>

@@ -30,6 +30,9 @@ export function BacktestWidget() {
               {live.overall.total_pnl_abs >= 0 ? '+' : ''}${live.overall.total_pnl_abs}
             </span>
           </span>
+          {live.window_note && (
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{live.window_note}</span>
+          )}
         </div>
       ) : (
         <div className="empty-state" style={{ padding: 0 }}>No closed trades yet</div>

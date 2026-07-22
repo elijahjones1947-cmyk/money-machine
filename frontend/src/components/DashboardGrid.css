@@ -10,42 +10,22 @@
   font-weight: 800;
 }
 
-.edit-toggle {
-  display: flex;
-  align-items: center;
-  gap: 10px;
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
 }
 
-.widget-tray {
-  position: fixed;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 12px 16px;
-  display: flex;
-  gap: 10px;
-  box-shadow: var(--shadow);
-  z-index: 50;
-  flex-wrap: wrap;
-  max-width: 90vw;
+.dashboard-grid .widget-shell {
+  height: 320px;
 }
 
-.widget-tray-empty {
-  color: var(--text-muted);
-  font-size: 13px;
-  padding: 4px 8px;
-}
+@media (max-width: 640px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
 
-.widget-tray button {
-  white-space: nowrap;
-}
-
-.react-grid-item.react-grid-placeholder {
-  background: var(--accent-dim) !important;
-  border: 1px dashed var(--accent);
-  border-radius: var(--radius-md);
-  opacity: 0.6;
+  .dashboard-grid .widget-shell {
+    height: 280px;
+  }
 }
