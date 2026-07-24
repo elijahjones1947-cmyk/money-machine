@@ -911,7 +911,13 @@ def api_dashboard():
 
     combined_equity = stock_acct["equity"] + forex_acct["equity"]
 
-    now = datetime.datetime.now().isoformat(timespec='minutes')
+    # Timezone-aware (UTC) so this matches the offset-bearing ISO strings
+    # DB-persisted timestamps already produce (TIMESTAMPTZ columns) --
+    # a naive datetime.now() here has no offset marker, which the
+    # frontend's `new Date(...)` then silently misreads as browser-local
+    # time instead of converting from UTC, showing times hours ahead of
+    # the viewer's actual clock.
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='minutes')
     if not state.equity_history['times'] or state.equity_history['times'][-1] != now:
         state.equity_history['times'].append(now)
         state.equity_history['values'].append(round(combined_equity, 2))
@@ -2169,7 +2175,7 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
             else '{:.2f}'.format(price)
         )
         state.trade_log.append({
-            'time': datetime.datetime.now().isoformat(),  # full datetime, not just time-of-day -- see load_persisted_state's matching format
+            'time': datetime.datetime.now(datetime.timezone.utc).isoformat(),  # tz-aware (UTC) -- matches load_persisted_state's DB-sourced format (TIMESTAMPTZ), see equity_history's matching fix above
             'action': action,
             'symbol': symbol,
             'asset_class': asset_class,
