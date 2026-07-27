@@ -230,9 +230,9 @@ def test_seed_default_strategies_params_match_observed_live_values(db_store):
     assert crypto["params"]["take_profit_pct"] == 2
 
     forex = db.get_latest_strategy_version("Higher High Breakout - Forex")
-    assert forex["params"]["breakout_buffer_pct"] == 0.009
-    assert forex["params"]["take_profit_pct"] == 0.09
-    assert forex["params"]["stop_loss_pct"] == 0.045
+    assert forex["params"]["breakout_buffer_pct"] == 0.014
+    assert forex["params"]["take_profit_pct"] == 0.14
+    assert forex["params"]["stop_loss_pct"] == 0.07
     assert forex["timeframe"] == "30m"
 
 

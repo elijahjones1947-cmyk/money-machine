@@ -1496,13 +1496,14 @@ _OBSERVED_LIVE_STRATEGY_PARAMS = {
         "take_profit_pct": 0.6, "stop_loss_pct": 0.35, "use_rsi_filter": True, "rsi_length": 14, "rsi_min": 45,
     },
     "forex": {
-        # Scaled 0.45x from the 1h-era values (breakout_buffer_pct 0.02,
-        # take_profit_pct 0.2, stop_loss_pct 0.1) for the move to a 30m
-        # timeframe -- lookback/EMA/RSI bar-counts intentionally
-        # untouched, only the volatility-sensitive percentages scale
-        # with the shorter interval.
-        "lookback": 7, "breakout_buffer_pct": 0.009, "ema_fast_length": 9, "ema_slow_length": 21,
-        "take_profit_pct": 0.09, "stop_loss_pct": 0.045, "use_rsi_filter": True, "rsi_length": 14, "rsi_min": 45,
+        # Scaled 0.7x from the 1h-era values (breakout_buffer_pct 0.02,
+        # take_profit_pct 0.2, stop_loss_pct 0.1) -- loosened up from the
+        # initial 0.45x scaling (0.009/0.09/0.045) as a deliberate
+        # frequency increase alongside the watchlist growing to 5 pairs.
+        # lookback/EMA/RSI bar-counts intentionally untouched, only the
+        # volatility-sensitive percentages scale with the interval.
+        "lookback": 7, "breakout_buffer_pct": 0.014, "ema_fast_length": 9, "ema_slow_length": 21,
+        "take_profit_pct": 0.14, "stop_loss_pct": 0.07, "use_rsi_filter": True, "rsi_length": 14, "rsi_min": 45,
     },
     "crypto": {
         "lookback": 7, "breakout_buffer_pct": 0.15, "ema_fast_length": 9, "ema_slow_length": 21,

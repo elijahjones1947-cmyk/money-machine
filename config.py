@@ -121,16 +121,23 @@ BROKER_CONFIG = {
 # strategy working as intended. Wider for crypto than stock/forex since
 # normal crypto volatility is bigger -- a tight threshold there would
 # force-close positions on routine noise, not just real problems.
+# forex's max_open_positions raised 3 -> 5 in lockstep with
+# state.watched_symbols["forex"] growing from 2 pairs (GBP_JPY, USD_JPY)
+# to 5 (+ GBP_AUD, NZD_JPY, CAD_JPY) -- matching one slot per watched
+# pair, same reasoning applied when stock grew to 3 symbols (that time,
+# stock's cap of 5 already comfortably covered the new watchlist size
+# and didn't need to move; this time forex's cap of 3 would have become
+# the new bottleneck before the watchlist itself did, so it moves too).
 RISK_CONFIG = {
     "paper": {
         "stock": {"max_position_size_pct": 0.10, "max_daily_loss_pct": 0.05, "max_open_positions": 5, "safety_stop_loss_pct": 0.02},
-        "forex": {"max_position_size_pct": 0.05, "max_daily_loss_pct": 0.03, "max_open_positions": 3, "max_leverage": 20, "safety_stop_loss_pct": 0.015},
+        "forex": {"max_position_size_pct": 0.05, "max_daily_loss_pct": 0.03, "max_open_positions": 5, "max_leverage": 20, "safety_stop_loss_pct": 0.015},
         "crypto": {"max_position_size_pct": 0.03, "max_daily_loss_pct": 0.02, "max_open_positions": 3, "safety_stop_loss_pct": 0.05},
         "account_wide": {"max_daily_loss_pct": 0.08},
     },
     "live": {
         "stock": {"max_position_size_pct": 0.05, "max_daily_loss_pct": 0.03, "max_open_positions": 5, "safety_stop_loss_pct": 0.02},
-        "forex": {"max_position_size_pct": 0.02, "max_daily_loss_pct": 0.01, "max_open_positions": 3, "max_leverage": 10, "safety_stop_loss_pct": 0.015},
+        "forex": {"max_position_size_pct": 0.02, "max_daily_loss_pct": 0.01, "max_open_positions": 5, "max_leverage": 10, "safety_stop_loss_pct": 0.015},
         "crypto": {"max_position_size_pct": 0.015, "max_daily_loss_pct": 0.01, "max_open_positions": 3, "safety_stop_loss_pct": 0.05},
         "account_wide": {"max_daily_loss_pct": 0.05},
     },

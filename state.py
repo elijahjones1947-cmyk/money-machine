@@ -30,11 +30,15 @@ peak_price_since_entry = {}
 # accepting it -- that's a separate server-side gate).
 #
 # Stock later grew to 3 (RBLX added alongside AAPL/HOOD, not a
-# replacement) -- forex/crypto stayed at 2. Nothing asset-class-uniform
-# about the "2" above; it's just what each list happens to hold.
+# replacement); forex later grew to 5 (GBP_AUD/NZD_JPY/CAD_JPY added
+# alongside GBP_JPY/USD_JPY, a deliberate frequency increase -- see
+# config.RISK_CONFIG's forex max_open_positions, raised in lockstep so
+# the risk cap doesn't become the binding constraint before the
+# watchlist itself does). Crypto stayed at 2. Nothing asset-class-
+# uniform about the "2" above; it's just what each list happens to hold.
 watched_symbols = {
     "stock": ["AAPL", "HOOD", "RBLX"],
-    "forex": ["GBP_JPY", "USD_JPY"],
+    "forex": ["GBP_JPY", "USD_JPY", "GBP_AUD", "NZD_JPY", "CAD_JPY"],
     "crypto": ["BTC/USD", "ETH/USD"],
 }
 
