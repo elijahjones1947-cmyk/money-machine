@@ -107,3 +107,25 @@ def test_get_strategy_rationale_does_not_touch_the_db(db_store, monkeypatch):
 
     monkeypatch.setattr(db, "get_all_symbol_strategy_assignments", fail_if_called)
     hermes_tools.get_strategy_rationale(None)  # must not raise
+
+
+def test_get_strategy_rationale_can_describe_a_second_strategy_family_by_name():
+    """More than one strategy family can exist now (Higher High Breakout,
+    Kev's ICC) -- passing strategy_name picks which one, and this works
+    with zero DB dependency even though the strategy isn't assigned to
+    any symbol (rationale is looked up purely by name)."""
+    result = hermes_tools.get_strategy_rationale(None, strategy_name="Kev's ICC")
+    assert result["name"] == "Kev's ICC"
+    assert "overview" in result and len(result["overview"]) > 0
+    for rule in ("indication", "correction", "continuation", "daily_filter"):
+        assert rule in result["entry_rules"]
+        assert "rationale" in result["entry_rules"][rule]
+    for rule in ("stop_loss", "take_profit"):
+        assert rule in result["exit_rules"]
+        assert "rationale" in result["exit_rules"][rule]
+
+
+def test_get_strategy_rationale_for_an_unknown_name_fails_gracefully():
+    result = hermes_tools.get_strategy_rationale(None, strategy_name="Not A Real Strategy")
+    assert "error" in result
+    assert "Not A Real Strategy" in result["error"]

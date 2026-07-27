@@ -1,0 +1,400 @@
+//@version=6
+strategy(
+     "Kev's ICC (Indication / Correction / Continuation)",
+     shorttitle = "Kev's ICC",
+     overlay = true,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10,
+     calc_on_every_tick = false
+     )
+
+// =============================================================================
+// Kev's ICC framework
+// -----------------------------------------------------------------------------
+// Indication   -- a new confirmed swing high/low BREAKS the prior swing
+//                 high/low on the entry timeframe. Just marks a level and
+//                 sets phase -- never traded on its own.
+// Correction   -- price pulls back against the Indication. Only counts once
+//                 a FULL candle CLOSES beyond the Indication level -- a wick
+//                 poking through does NOT confirm it. No close = no
+//                 Correction = no trade, full stop.
+// Continuation -- price closes back through the Indication level, in the
+//                 ORIGINAL direction, with a full candle close (same
+//                 close-confirmation gate as Correction). This is the only
+//                 entry trigger in the whole framework.
+//
+// The close-confirmation gate on Correction (and, here, on Continuation too)
+// exists specifically because the known failure mode of trading this
+// framework isn't the framework itself -- it's entering early on a wick
+// before the pullback has actually confirmed, or talking yourself into an
+// exception mid-trade. Every close-confirmation check below is that
+// discipline enforced in code, not a suggestion.
+//
+// Generic by design: no instrument-specific logic. Whoever assigns this to a
+// symbol picks the instrument; this script only encodes the sequence.
+// Entry timeframe is meant to be 4H -- put this on a 4H chart. Daily is an
+// OPTIONAL higher-timeframe filter (toggle below), not a hard requirement.
+// =============================================================================
+
+// --- Inputs: core sequence --------------------------------------------------
+grp_core = "Core sequence (Indication / Correction / Continuation)"
+pivotLenL = input.int(5, "Pivot lookback bars (left)", minval = 1, group = grp_core,
+     tooltip = "Untuned guess -- backtest per instrument before trusting it. " +
+     "ta.pivothigh/ta.pivotlow need this many bars on EACH side to confirm a " +
+     "swing point, so every plotted Indication level necessarily lags by " +
+     "`pivotLenR` bars once it appears -- that lag is expected behavior, not a bug.")
+pivotLenR = input.int(5, "Pivot lookahead bars (right, confirmation lag)", minval = 1, group = grp_core,
+     tooltip = "Also untuned. This is how many bars AFTER a swing point Pine needs " +
+     "to see before confirming it -- the level will only ever appear on your " +
+     "chart `pivotLenR` bars after the actual high/low occurred.")
+eqTolerancePct = input.float(0.05, "Equal-high/low tolerance %", minval = 0.0, step = 0.01, group = grp_core,
+     tooltip = "Two consecutive swing highs (or lows) within this %% of each other are " +
+     "treated as 'equal highs/lows' -- indecision, not a genuine break of structure -- " +
+     "and will NOT register as a new Indication.")
+
+// --- Inputs: daily filter ----------------------------------------------------
+grp_daily = "Daily higher-timeframe filter (optional)"
+useDailyFilter = input.bool(true, "Use daily trend filter", group = grp_daily,
+     tooltip = "ON: only take 4H Continuations aligned with daily trend direction, and " +
+     "skip entirely for an instrument whose daily is ranging with no clear bias. " +
+     "OFF: every valid 4H ICC signal is tradeable regardless of daily context -- " +
+     "more frequency, no higher-timeframe alignment check.")
+dailyPivotLenL = input.int(3, "Daily pivot lookback bars (left)", minval = 1, group = grp_daily)
+dailyPivotLenR = input.int(3, "Daily pivot lookahead bars (right)", minval = 1, group = grp_daily)
+dailySwingsForBias = input.int(3, "Daily swings required for a clear bias", minval = 2, maxval = 3, group = grp_daily,
+     tooltip = "Kev's rule: daily bias needs higher-highs/higher-lows (or lower/lower) " +
+     "across the last 3-4 confirmed swings, not just the most recent one -- a single " +
+     "rally/dip doesn't flip the trend. This checks the last 2 or 3 confirmed swings " +
+     "(this input) all agree in direction before calling a bias 'clear'.")
+
+// --- Inputs: stops / targets --------------------------------------------------
+grp_targets = "Stops / targets"
+slBufferPct = input.float(0.05, "Stop-loss buffer beyond Correction extreme (%)", minval = 0.0, step = 0.01, group = grp_targets,
+     tooltip = "Stop sits beyond (not exactly AT) the Correction's high/low, by this " +
+     "small %% buffer -- 'beyond the structure that invalidates the setup' per Kev's " +
+     "rule. Untuned default.")
+h4PivotHistoryBars = input.int(10, "4H opposing-pivot lookback (levels remembered)", minval = 3, maxval = 30, group = grp_targets,
+     tooltip = "How many recent confirmed 4H swing highs/lows to keep on hand for the " +
+     "'no daily filter' take-profit rule below (next opposing 4H structure level).")
+
+// --- Inputs: no-trade filters --------------------------------------------------
+grp_filters = "No-trade filters"
+blockOnIndecision = input.bool(true, "Block new Indications during equal-high/low indecision", group = grp_filters)
+
+// --- Inputs: webhook / alerts --------------------------------------------------
+grp_alert = "Webhook alert (live bot integration)"
+webhookSecret = input.string("", "Webhook shared secret", group = grp_alert,
+     tooltip = "Fill in the bot's real WEBHOOK_SECRET before using -- left blank here " +
+     "on purpose so this file is safe to copy/share without leaking it.")
+
+// =============================================================================
+// Live-bot webhook integration -- mirrors the existing Higher High Breakout
+// script's conventions EXACTLY, so /webhook (server.py) accepts this
+// strategy's alerts with zero backend changes:
+//   symbol      -- crypto uses "BASE/QUOTE" (e.g. "BTC/USD"), forex uses
+//                  "BASE_QUOTE" (e.g. "GBP_JPY"), stock is the plain ticker
+//                  (e.g. "AAPL"). Built here from syminfo.basecurrency/
+//                  syminfo.currency/syminfo.type rather than string-slicing
+//                  syminfo.ticker, so it's correct regardless of which
+//                  exchange prefix TradingView's feed uses for a given
+//                  instrument.
+//   strategy_id -- the Pine-side code is a FIXED per-asset-class number
+//                  (1 = stock, 2 = forex, 3 = crypto), NOT a strategies.id
+//                  database row reference. The backend validates this against
+//                  the symbol's actual asset class, not an exact version, so
+//                  it never needs to change even as strategy versions/rows
+//                  change on the backend (server.py's PINE_STRATEGY_ASSET_
+//                  CLASS_CODES, fixed 2026-07-27 specifically so this kind of
+//                  code never has to be touched again after a version bump).
+// =============================================================================
+f_webhookSymbol() =>
+    string sym = syminfo.ticker
+    if syminfo.type == "forex"
+        sym := syminfo.basecurrency + "_" + syminfo.currency
+    else if syminfo.type == "crypto"
+        sym := syminfo.basecurrency + "/" + syminfo.currency
+    sym
+
+f_webhookStrategyId() =>
+    syminfo.type == "forex" ? 2 : syminfo.type == "crypto" ? 3 : 1
+
+f_alertPayload(action) =>
+    '{"secret":"' + webhookSecret + '","action":"' + action + '","symbol":"' +
+     f_webhookSymbol() + '","strategy_id":' + str.tostring(f_webhookStrategyId()) + '}'
+
+// =============================================================================
+// 4H structure: pivot detection + running history
+// =============================================================================
+pivotHigh = ta.pivothigh(pivotLenL, pivotLenR)
+pivotLow  = ta.pivotlow(pivotLenL, pivotLenR)
+
+var float lastPivotHigh = na
+var float lastPivotLow  = na
+
+var float[] h4Highs = array.new_float(0)
+var float[] h4Lows  = array.new_float(0)
+
+if not na(pivotHigh)
+    array.unshift(h4Highs, pivotHigh)
+    if array.size(h4Highs) > h4PivotHistoryBars
+        array.pop(h4Highs)
+if not na(pivotLow)
+    array.unshift(h4Lows, pivotLow)
+    if array.size(h4Lows) > h4PivotHistoryBars
+        array.pop(h4Lows)
+
+// "Equal highs/lows repeatedly" -- indecision, not trend (a no-trade
+// condition per Kev's rules): a new pivot within eqTolerancePct% of the
+// prior one is a retest, not a genuine break of structure.
+indecisionHigh = not na(pivotHigh) and not na(lastPivotHigh) and lastPivotHigh != 0.0 and
+     math.abs(pivotHigh - lastPivotHigh) / lastPivotHigh * 100 < eqTolerancePct
+indecisionLow = not na(pivotLow) and not na(lastPivotLow) and lastPivotLow != 0.0 and
+     math.abs(pivotLow - lastPivotLow) / lastPivotLow * 100 < eqTolerancePct
+var bool indecisionFlag = false
+if indecisionHigh or indecisionLow
+    indecisionFlag := true
+else if not na(pivotHigh) or not na(pivotLow)
+    indecisionFlag := false
+
+// =============================================================================
+// Daily higher-timeframe filter -- request.security with a [1] historical
+// offset applied AFTER the call and lookahead=barmerge.lookahead_off, so the
+// daily bias read here can never repaint intrabar as today's daily candle
+// develops.
+// =============================================================================
+f_dailyPivots() =>
+    var float[] dHighs = array.new_float(0)
+    var float[] dLows  = array.new_float(0)
+    ph = ta.pivothigh(dailyPivotLenL, dailyPivotLenR)
+    pl = ta.pivotlow(dailyPivotLenL, dailyPivotLenR)
+    if not na(ph)
+        array.unshift(dHighs, ph)
+        if array.size(dHighs) > 4
+            array.pop(dHighs)
+    if not na(pl)
+        array.unshift(dLows, pl)
+        if array.size(dLows) > 4
+            array.pop(dLows)
+    h0 = array.size(dHighs) > 0 ? array.get(dHighs, 0) : na
+    h1 = array.size(dHighs) > 1 ? array.get(dHighs, 1) : na
+    h2 = array.size(dHighs) > 2 ? array.get(dHighs, 2) : na
+    l0 = array.size(dLows) > 0 ? array.get(dLows, 0) : na
+    l1 = array.size(dLows) > 1 ? array.get(dLows, 1) : na
+    l2 = array.size(dLows) > 2 ? array.get(dLows, 2) : na
+    [h0, h1, h2, l0, l1, l2]
+
+[dH0raw, dH1raw, dH2raw, dL0raw, dL1raw, dL2raw] = request.security(
+     syminfo.tickerid, "D", f_dailyPivots(), lookahead = barmerge.lookahead_off)
+dH0 = dH0raw[1]
+dH1 = dH1raw[1]
+dH2 = dH2raw[1]
+dL0 = dL0raw[1]
+dL1 = dL1raw[1]
+dL2 = dL2raw[1]
+
+// Trend persistence rule: these are CONFIRMED swing pivots, which only move
+// when price actually closes beyond the prior opposing structure point --
+// so a rally/dip alone can't flip this, only a genuine break can. No extra
+// state needed to enforce that; it falls out of using confirmed pivots.
+dailyBullish3 = dailySwingsForBias >= 3 and not na(dH2) and not na(dL2) and dH0 > dH1 and dH1 > dH2 and dL0 > dL1 and dL1 > dL2
+dailyBearish3 = dailySwingsForBias >= 3 and not na(dH2) and not na(dL2) and dH0 < dH1 and dH1 < dH2 and dL0 < dL1 and dL1 < dL2
+dailyBullish2 = not na(dH1) and not na(dL1) and dH0 > dH1 and dL0 > dL1
+dailyBearish2 = not na(dH1) and not na(dL1) and dH0 < dH1 and dL0 < dL1
+
+dailyBullish = dailySwingsForBias >= 3 ? dailyBullish3 : dailyBullish2
+dailyBearish = dailySwingsForBias >= 3 ? dailyBearish3 : dailyBearish2
+dailyRanging = not dailyBullish and not dailyBearish
+
+// =============================================================================
+// Phase state machine
+// none=0 / bull_indicated=1 / bull_corrected=2 / bear_indicated=3 / bear_corrected=4
+// =============================================================================
+PHASE_NONE           = 0
+PHASE_BULL_INDICATED = 1
+PHASE_BULL_CORRECTED = 2
+PHASE_BEAR_INDICATED = 3
+PHASE_BEAR_CORRECTED = 4
+
+var int phase = PHASE_NONE
+var float structureLevel   = na  // the Indication level Correction/Continuation are judged against
+var float correctionExtreme = na // running low (bull) / high (bear) reached during Correction -- becomes the SL reference
+
+// Captured before anything below mutates `phase` this bar, so every
+// transition this bar (Indication -> Correction -> Continuation) is judged
+// against the SAME start-of-bar state instead of cascading through more
+// than one stage in a single pass -- that collapse would let a fresh
+// opposing pivot silently steal a pending Continuation out from under an
+// in-flight Correction in the same bar it formed.
+phaseAtBarStart = phase
+
+f_phaseLabel(p) =>
+    p == PHASE_BULL_INDICATED ? "Bull Indicated" :
+     p == PHASE_BULL_CORRECTED ? "Bull Corrected" :
+     p == PHASE_BEAR_INDICATED ? "Bear Indicated" :
+     p == PHASE_BEAR_CORRECTED ? "Bear Corrected" : "None"
+
+// --- 1. Indication: a new confirmed swing breaks the PRIOR swing in the
+// same direction. Blocked during equal-high/low indecision per the filter
+// above. Only takes effect when flat (strategy.position_size == 0) AND
+// nothing already in flight (phase was NONE at the start of this bar) -- a
+// pending Correction/Continuation setup keeps ownership of structureLevel
+// until it either triggers or is invalidated, rather than being silently
+// overwritten by a fresh pivot on the same bar.
+canIndicate = strategy.position_size == 0 and phaseAtBarStart == PHASE_NONE and (not blockOnIndecision or not indecisionFlag)
+
+if canIndicate and not na(pivotHigh) and not na(lastPivotHigh) and pivotHigh > lastPivotHigh and not indecisionHigh
+    phase := PHASE_BULL_INDICATED
+    structureLevel := pivotHigh
+    correctionExtreme := na
+
+if canIndicate and not na(pivotLow) and not na(lastPivotLow) and pivotLow < lastPivotLow and not indecisionLow
+    phase := PHASE_BEAR_INDICATED
+    structureLevel := pivotLow
+    correctionExtreme := na
+
+if not na(pivotHigh)
+    lastPivotHigh := pivotHigh
+if not na(pivotLow)
+    lastPivotLow := pivotLow
+
+// --- 2. Correction: requires a FULL candle CLOSE beyond the Indication
+// level -- a wick does NOT count. No close = no valid Correction = no trade,
+// per Kev's rule (this is the exact gate that prevents the framework's known
+// deviation risk: entering before the pullback has actually confirmed).
+// Judged against phaseAtBarStart so a same-bar Indication (above) can't
+// immediately fall through into Correction too.
+if phaseAtBarStart == PHASE_BULL_INDICATED and close < structureLevel
+    phase := PHASE_BULL_CORRECTED
+    correctionExtreme := low
+else if phaseAtBarStart == PHASE_BULL_CORRECTED
+    correctionExtreme := math.min(correctionExtreme, low)
+
+if phaseAtBarStart == PHASE_BEAR_INDICATED and close > structureLevel
+    phase := PHASE_BEAR_CORRECTED
+    correctionExtreme := high
+else if phaseAtBarStart == PHASE_BEAR_CORRECTED
+    correctionExtreme := math.max(correctionExtreme, high)
+
+// --- 3. Continuation: price closes back through the Indication level, in
+// the ORIGINAL direction -- the only entry trigger in this whole framework.
+// Judged against phaseAtBarStart too, so a same-bar Indication->Correction
+// transition (above) can't also fire a Continuation in that same bar --
+// each stage gets its own bar to confirm on, matching the framework's
+// inherently multi-bar sequence. "With strength" is operationalized as the
+// same full-candle-close-beyond-level confirmation used for Correction
+// (Kev's rules are pure structure/close-based -- no ADX or momentum
+// indicator bolted on here on purpose, see the no-Fib/no-ADX note below).
+longContinuation = phaseAtBarStart == PHASE_BULL_CORRECTED and close > structureLevel
+shortContinuation = phaseAtBarStart == PHASE_BEAR_CORRECTED and close < structureLevel
+
+// Daily filter gate: aligned direction required when the filter's on;
+// ranging daily with the filter on is an explicit no-trade condition.
+longAllowed = not useDailyFilter or (dailyBullish and not dailyRanging)
+shortAllowed = not useDailyFilter or (dailyBearish and not dailyRanging)
+
+// =============================================================================
+// Targets: next daily reaction zone (filter on) or next opposing 4H
+// structure level (filter off, confirmed with Eli: the next opposing pivot
+// high/low in the trade's direction).
+// =============================================================================
+f_nextLevelAbove(arr, price) =>
+    float result = na
+    for i = 0 to array.size(arr) - 1
+        v = array.get(arr, i)
+        if v > price and (na(result) or v < result)
+            result := v
+    result
+
+f_nextLevelBelow(arr, price) =>
+    float result = na
+    for i = 0 to array.size(arr) - 1
+        v = array.get(arr, i)
+        if v < price and (na(result) or v > result)
+            result := v
+    result
+
+dailyHighsArr = array.from(dH0, dH1, dH2)
+dailyLowsArr  = array.from(dL0, dL1, dL2)
+
+f_longTarget() =>
+    useDailyFilter ? f_nextLevelAbove(dailyHighsArr, close) : f_nextLevelAbove(h4Highs, close)
+
+f_shortTarget() =>
+    useDailyFilter ? f_nextLevelBelow(dailyLowsArr, close) : f_nextLevelBelow(h4Lows, close)
+
+// =============================================================================
+// Entries + exits -- direct alert() calls carrying the bot's JSON payload,
+// same mechanism the existing Higher High Breakout script uses. Entries
+// fire once per bar CLOSE only (Continuation is inherently a close-confirmed
+// event). Exits use strategy.exit's native stop/limit so TradingView watches
+// the SL/TP levels tick-by-tick rather than only at bar close -- an
+// intrabar TP/SL touch on a wide daily-swing target shouldn't have to wait
+// for a full 4H candle to close to be caught, same reasoning that motivated
+// the live bot's own intrabar exit poller for its other strategy.
+// =============================================================================
+if longContinuation and longAllowed
+    slLevel = correctionExtreme * (1 - slBufferPct / 100)
+    tpLevel = f_longTarget()
+    strategy.entry("Long", strategy.long)
+    alert(f_alertPayload("buy"), alert.freq_once_per_bar_close)
+    strategy.exit("Long Exit", from_entry = "Long", stop = slLevel, limit = na(tpLevel) ? na : tpLevel,
+         alert_message = f_alertPayload("sell"))
+    phase := PHASE_NONE
+
+if shortContinuation and shortAllowed
+    slLevel = correctionExtreme * (1 + slBufferPct / 100)
+    tpLevel = f_shortTarget()
+    strategy.entry("Short", strategy.short)
+    alert(f_alertPayload("sell"), alert.freq_once_per_bar_close)
+    strategy.exit("Short Exit", from_entry = "Short", stop = slLevel, limit = na(tpLevel) ? na : tpLevel,
+         alert_message = f_alertPayload("buy"))
+    phase := PHASE_NONE
+
+// Secondary/manual alert option per the original spec -- lets Eli set up a
+// simple "Long trigger" / "Short trigger" alert from the Create Alert
+// dialog without picking "Any alert() function call", if he ever wants a
+// manual-only setup on a given chart. NOT what the live bot listens to --
+// the alert() calls above are.
+alertcondition(longContinuation and longAllowed, title = "ICC Long Continuation", message = "Kev's ICC: long continuation confirmed")
+alertcondition(shortContinuation and shortAllowed, title = "ICC Short Continuation", message = "Kev's ICC: short continuation confirmed")
+
+// =============================================================================
+// Visuals
+// =============================================================================
+plot(phase == PHASE_BULL_INDICATED or phase == PHASE_BULL_CORRECTED ? structureLevel : na,
+     "Bull Indication level", color = color.new(color.lime, 0), style = plot.style_linebr, linewidth = 2)
+plot(phase == PHASE_BEAR_INDICATED or phase == PHASE_BEAR_CORRECTED ? structureLevel : na,
+     "Bear Indication level", color = color.new(color.red, 0), style = plot.style_linebr, linewidth = 2)
+
+plotshape(longContinuation and longAllowed, title = "Long entry", style = shape.triangleup,
+     location = location.belowbar, color = color.lime, size = size.small)
+plotshape(shortContinuation and shortAllowed, title = "Short entry", style = shape.triangledown,
+     location = location.abovebar, color = color.red, size = size.small)
+
+// =============================================================================
+// Status table -- live sanity-checking (phase, daily bias, indecision, filter)
+// =============================================================================
+var table statusTable = table.new(position.top_right, 2, 5, border_width = 1)
+if barstate.islast
+    table.cell(statusTable, 0, 0, "Kev's ICC", text_color = color.white, bgcolor = color.gray, text_size = size.small)
+    table.cell(statusTable, 1, 0, syminfo.ticker, text_color = color.white, bgcolor = color.gray, text_size = size.small)
+
+    table.cell(statusTable, 0, 1, "Phase", text_size = size.small)
+    table.cell(statusTable, 1, 1, f_phaseLabel(phase),
+         bgcolor = phase == PHASE_NONE ? color.new(color.gray, 70) :
+              (phase == PHASE_BULL_INDICATED or phase == PHASE_BULL_CORRECTED) ? color.new(color.lime, 70) :
+              color.new(color.red, 70),
+         text_size = size.small)
+
+    table.cell(statusTable, 0, 2, "Daily bias", text_size = size.small)
+    table.cell(statusTable, 1, 2, not useDailyFilter ? "filter off" : dailyBullish ? "Bullish" : dailyBearish ? "Bearish" : "Ranging",
+         bgcolor = not useDailyFilter ? color.new(color.gray, 70) :
+              dailyBullish ? color.new(color.lime, 70) : dailyBearish ? color.new(color.red, 70) : color.new(color.yellow, 70),
+         text_size = size.small)
+
+    table.cell(statusTable, 0, 3, "Indecision", text_size = size.small)
+    table.cell(statusTable, 1, 3, indecisionFlag ? "Equal highs/lows" : "Clear",
+         bgcolor = indecisionFlag ? color.new(color.yellow, 70) : color.new(color.gray, 70), text_size = size.small)
+
+    table.cell(statusTable, 0, 4, "Daily filter", text_size = size.small)
+    table.cell(statusTable, 1, 4, useDailyFilter ? "ON" : "OFF", text_size = size.small)

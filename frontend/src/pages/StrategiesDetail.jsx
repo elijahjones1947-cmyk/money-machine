@@ -20,9 +20,20 @@ const DEFAULT_PARAMS = {
   take_profit_pct: 0.6, stop_loss_pct: 0.35, use_rsi_filter: true, rsi_length: 14, rsi_min: 45,
 };
 
+// Higher High Breakout's own shape gets the tailored one-liner below;
+// anything else (a different strategy family with its own param shape,
+// e.g. Kev's ICC) falls back to a generic key:value listing instead of
+// silently printing "undefined" for keys that shape doesn't have.
+const HHB_SUMMARY_KEYS = ['lookback', 'breakout_buffer_pct', 'take_profit_pct', 'stop_loss_pct'];
+
 function paramsSummary(params) {
   if (!params) return '';
-  return `lookback ${params.lookback} · buffer ${params.breakout_buffer_pct}% · TP ${params.take_profit_pct}% · SL ${params.stop_loss_pct}%`;
+  if (HHB_SUMMARY_KEYS.every((k) => k in params)) {
+    return `lookback ${params.lookback} · buffer ${params.breakout_buffer_pct}% · TP ${params.take_profit_pct}% · SL ${params.stop_loss_pct}%`;
+  }
+  const entries = Object.entries(params);
+  if (entries.length === 0) return '';
+  return entries.map(([k, v]) => `${k}: ${v}`).join(' · ');
 }
 
 function CreateStrategyForm({ onCreated }) {

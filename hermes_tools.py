@@ -194,20 +194,27 @@ def get_strategy_config(ctx, **_):
     }
 
 
-def get_strategy_rationale(ctx, **_):
-    """The Higher High Breakout strategy's overview plus the WHY behind
-    each entry rule (trend filter, breakout buffer, higher-low, RSI
-    floor) and exit rule (take profit, stop loss, trailing stop,
-    momentum exit) -- strategy_knowledge.py's content, distinct from
+def get_strategy_rationale(ctx, strategy_name=None, **_):
+    """A strategy family's overview plus the WHY behind each entry rule
+    and exit rule -- strategy_knowledge.py's content, distinct from
     get_strategy_config's numeric params/timeframe. Call this when asked
-    to explain the strategy's psychology/reasoning, not just cite its
+    to explain a strategy's psychology/reasoning, not just cite its
     numbers -- e.g. "why does it wait for a breakout instead of buying
     the dip" or "what's the point of the RSI filter" need this, not
-    get_strategy_config. Static content (doesn't vary per symbol or
-    strategy version -- every version of Higher High Breakout shares the
-    same rule structure, just different numbers), so no DB/network call
-    here, unlike get_strategy_config."""
-    return strategy_knowledge.describe_strategy()
+    get_strategy_config.
+
+    `strategy_name` should match a real strategies.name (see
+    get_strategy_config's symbol_strategies -- each entry's "name" field
+    is exactly what to pass here). Defaults to Higher High Breakout if
+    omitted, since that's the only strategy family that existed before
+    this took a name at all. Works even for a strategy with no current
+    symbol assignment (e.g. one that's been created but not yet switched
+    to for any symbol) -- describe_strategy() looks up rationale by name
+    alone, never by assignment. Static content (doesn't vary per symbol
+    or strategy version -- every version of a given strategy family
+    shares the same rule structure, just different numbers), so no DB/
+    network call here, unlike get_strategy_config."""
+    return strategy_knowledge.describe_strategy(strategy_name)
 
 
 def get_asset_market_data(ctx, symbol, asset_class=None, timeframe="1h", bars=20, **_):
@@ -469,7 +476,7 @@ TOOL_SCHEMAS = [
     {"name": "get_recent_signals", "description": "Get recent trade signals that were acted on (note: only executed signals are tracked, not rejected ones).", "input_schema": {"type": "object", "properties": {"limit": {"type": "integer"}}}},
     {"name": "get_risk_state", "description": "Get the live risk manager's halt status per asset class and today's running P&L.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_strategy_config", "description": "Get the current risk config, regime thresholds, watched symbols, and each symbol's actually-assigned strategy (name, version, params, and its timeframe/resolution -- e.g. 30m or 1h).", "input_schema": {"type": "object", "properties": {}}},
-    {"name": "get_strategy_rationale", "description": "Get the Higher High Breakout strategy's overview and the reasoning/psychology behind each entry rule (trend filter, breakout buffer, higher-low, RSI floor) and exit rule (take profit, stop loss, trailing stop, momentum exit) -- the WHY, not just the numeric params get_strategy_config returns.", "input_schema": {"type": "object", "properties": {}}},
+    {"name": "get_strategy_rationale", "description": "Get a strategy family's overview and the reasoning/psychology behind each of its entry and exit rules -- the WHY, not just the numeric params get_strategy_config returns. Pass strategy_name to pick which family (match it against get_strategy_config's symbol_strategies[symbol].name); defaults to Higher High Breakout if omitted. Works even for a strategy not currently assigned to any symbol.", "input_schema": {"type": "object", "properties": {"strategy_name": {"type": "string", "description": "Exact strategy family name, e.g. \"Higher High Breakout\" or \"Kev's ICC\". Optional -- defaults to Higher High Breakout."}}}},
     {"name": "get_asset_market_data", "description": "Get recent OHLCV price bars for a specific symbol.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}, "asset_class": {"type": "string", "enum": ["stock", "forex", "crypto"]}, "timeframe": {"type": "string", "enum": ["1m", "5m", "15m", "1h", "4h", "1d"]}, "bars": {"type": "integer"}}, "required": ["symbol"]}},
     {"name": "get_broad_market_context", "description": "Get a snapshot of major index/sector ETFs (SPY, QQQ, DIA, and key sector ETFs) as a proxy for overall market conditions.", "input_schema": {"type": "object", "properties": {}}},
     {"name": "get_backtest_results", "description": "Get metrics (win rate, max drawdown, Sharpe) from the most recent backtest run, overall and broken out by market regime. Pass symbol to filter to one instrument.", "input_schema": {"type": "object", "properties": {"symbol": {"type": "string"}}}},

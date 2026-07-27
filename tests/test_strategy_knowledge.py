@@ -54,3 +54,35 @@ def test_all_params_used_are_real_default_params_keys():
     for rule in all_rules:
         for param_name in rule["params_used"]:
             assert param_name in DEFAULT_PARAMS, "{!r} is not a real strategy param".format(param_name)
+
+
+# --- Multi-strategy support (describe_strategy(name)) -----------------------
+
+def test_describe_strategy_defaults_to_higher_high_breakout():
+    """No name passed -- every caller written before a second strategy
+    family existed must keep getting HHB, unchanged."""
+    assert sk.describe_strategy() == sk.describe_strategy(sk.STRATEGY_NAME)
+    assert sk.describe_strategy()["name"] == sk.STRATEGY_NAME
+
+
+def test_describe_strategy_can_describe_kevs_icc_by_name():
+    d = sk.describe_strategy("Kev's ICC")
+    assert d["name"] == sk.ICC_STRATEGY_NAME
+    assert isinstance(d["overview"], str) and len(d["overview"]) > 0
+    assert d["entry_rules"] == sk.ICC_ENTRY_RULES
+    assert d["exit_rules"] == sk.ICC_EXIT_RULES
+
+
+def test_every_icc_rule_has_rule_text_and_rationale():
+    for key, rule in {**sk.ICC_ENTRY_RULES, **sk.ICC_EXIT_RULES}.items():
+        assert rule["rule"], "{} has no rule text".format(key)
+        assert rule["rationale"], "{} has no rationale".format(key)
+
+
+def test_describe_strategy_fails_gracefully_for_an_unknown_name():
+    """An unrecognized name is a normal, expected outcome (e.g. a brand
+    new strategy this module has no rationale for yet), not a crash."""
+    d = sk.describe_strategy("Not A Real Strategy")
+    assert "error" in d
+    assert sk.STRATEGY_NAME in d["known_strategies"]
+    assert sk.ICC_STRATEGY_NAME in d["known_strategies"]
