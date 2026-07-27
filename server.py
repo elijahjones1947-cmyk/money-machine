@@ -329,6 +329,22 @@ def run_intrabar_exit_checks():
         if broker is None:
             continue
 
+        # Dust positions (config.DUST_POSITION_VALUE_USD -- same
+        # threshold the max_open_positions cap and the overlapping-buy
+        # guard already use) aren't real capital at risk, and Alpaca
+        # rejects a force-close attempt on them outright (a market order
+        # under its per-symbol minimum notional) -- without this check,
+        # this job retried a doomed close every
+        # _INTRABAR_POLL_INTERVAL_SECONDS forever. Confirmed live: BTC/USD,
+        # ETH/USD, and SOL/USD dust (cost basis a few cents or less) each
+        # generated a "did not succeed (status 400)" error roughly every
+        # 20 seconds, continuously, for days -- tens of thousands of
+        # failed attempts and log rows for positions worth essentially
+        # nothing, never a real trade left unclosed.
+        position_value = p["qty"] * p["avg_entry"]
+        if position_value < config.DUST_POSITION_VALUE_USD:
+            continue
+
         try:
             strategy_assignment = db.get_symbol_strategy_assignment(symbol)
         except Exception as e:
