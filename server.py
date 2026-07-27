@@ -1159,6 +1159,22 @@ def _handle_webhook_parse_failure(e):
     return e.get_response()
 
 
+# The Pine script's own webhookStrategyId field (Phase 4) is a fixed,
+# per-asset-class constant Eli hardcodes in the alert JSON -- 1 for
+# every stock alert, 2 for every forex alert, 3 for every crypto alert
+# -- and it never changes on its own. It is NOT a strategies.id row
+# reference, even though early Phase 4 code compared it as if it were
+# one: strategies.id increments every time ANY asset class's strategy
+# gets a new version via /api/strategies/assign, so an exact-ID
+# comparison is guaranteed to start rejecting every live alert for that
+# asset class the moment a version bump happens -- exactly what
+# silently broke forex for a full week after its Phase 4->Phase 5
+# reassignment. This map is what the payload's code space actually
+# means; keep it in sync with the Pine script's convention, not with
+# any row in the strategies table.
+PINE_STRATEGY_ASSET_CLASS_CODES = {1: 'stock', 2: 'forex', 3: 'crypto'}
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """External-facing route for TradingView alerts — requires the shared
@@ -1258,25 +1274,58 @@ def webhook():
         logging.warning('Rejected webhook call: unsubstituted symbol placeholder')
         return jsonify({'error': 'invalid symbol'}), 400
 
-    # Strategy-switch safety gate (Phase 4): if THIS alert has been
-    # migrated to include strategy_id in its message JSON, it must match
-    # whatever's CURRENTLY assigned as active for this symbol -- a
-    # mismatch means a stale alert (still running an old Pine variant,
-    # or pointed at a symbol that's since been switched to a different
-    # strategy via /api/strategies/assign) is firing, and gets rejected
-    # instead of silently executing under out-of-date logic. Alerts that
-    # DON'T send strategy_id at all (not yet migrated -- every alert live
-    # today, until updated) are NOT gated: the field's mere presence is
-    # what turns this check on, per-alert, so migrating one alert at a
-    # time can never break the others mid-rollout.
+    # Strategy-switch safety gate (Phase 4, revised): if THIS alert has
+    # been migrated to include strategy_id in its message JSON, it must
+    # represent the SAME ASSET CLASS as the symbol it's firing for.
+    # Alerts that DON'T send strategy_id at all (not yet migrated) are
+    # NOT gated: the field's mere presence is what turns this check on,
+    # per-alert, so migrating one alert at a time can never break the
+    # others mid-rollout.
     #
-    # A DB error verifying this is NOT treated as a mismatch -- same "a
-    # DB hiccup must never be the reason a real trade signal gets
-    # rejected outright" rule this codebase applies everywhere else
-    # (e.g. the durability INSERT right below). Only a SUCCESSFUL lookup
-    # that actually disagrees (or finds no assignment at all) rejects.
+    # This originally compared incoming_strategy_id for EXACT equality
+    # against db.get_symbol_strategy_assignment(symbol)['id'] -- but
+    # that assumed the Pine script's own code would track
+    # strategies.id's version bumps, which it structurally can't (see
+    # PINE_STRATEGY_ASSET_CLASS_CODES above): every reassignment of an
+    # asset class to a new strategy version made the exact-ID check
+    # start rejecting EVERY subsequent alert for that class, since only
+    # editing the live Pine script (a manual, easy-to-forget step) could
+    # ever make the numbers agree again. Checking asset class instead
+    # still catches the failure mode this gate exists for -- a
+    # genuinely wrong-asset-class payload, e.g. a stock alert firing
+    # with forex's code -- without ever needing a TradingView-side
+    # update again just because a strategy version changed.
+    #
+    # A DB error verifying the "has some assignment at all" check is NOT
+    # treated as a mismatch -- same "a DB hiccup must never be the
+    # reason a real trade signal gets rejected outright" rule this
+    # codebase applies everywhere else (e.g. the durability INSERT right
+    # below). Only a SUCCESSFUL lookup that actually finds no assignment
+    # rejects.
     incoming_strategy_id = data.get('strategy_id')
     if incoming_strategy_id is not None:
+        expected_asset_class = PINE_STRATEGY_ASSET_CLASS_CODES.get(incoming_strategy_id)
+        if expected_asset_class is None:
+            logging.warning(
+                'Rejected webhook call: {} sent strategy_id={!r}, not a recognized asset-class code '
+                '(expected one of {}).'.format(symbol, incoming_strategy_id, sorted(PINE_STRATEGY_ASSET_CLASS_CODES))
+            )
+            return jsonify({'error': 'unrecognized strategy_id {!r} for {}'.format(incoming_strategy_id, symbol)}), 409
+
+        actual_asset_class = asset_class_for_symbol(symbol)
+        if expected_asset_class != actual_asset_class:
+            logging.warning(
+                'Rejected webhook call: {} sent strategy_id={!r} ({}) but {} is actually {} -- likely '
+                'configured on the wrong chart/instrument.'.format(
+                    symbol, incoming_strategy_id, expected_asset_class, symbol, actual_asset_class,
+                )
+            )
+            return jsonify({
+                'error': "strategy_id {!r} ({}) does not match {}'s asset class ({})".format(
+                    incoming_strategy_id, expected_asset_class, symbol, actual_asset_class,
+                )
+            }), 409
+
         assignment = None
         verifiable = True
         try:
@@ -1284,7 +1333,7 @@ def webhook():
         except Exception as e:
             verifiable = False
             logging.error(
-                'Could not verify strategy_id for {} (DB error) -- processing the signal anyway '
+                'Could not verify strategy assignment for {} (DB error) -- processing the signal anyway '
                 'rather than rejecting a real trade signal over an availability issue: {}'.format(symbol, e)
             )
         if verifiable and assignment is None:
@@ -1294,16 +1343,6 @@ def webhook():
                 'signal.'.format(symbol, incoming_strategy_id, symbol)
             )
             return jsonify({'error': 'no active strategy assignment for {}'.format(symbol)}), 409
-        if verifiable and assignment is not None and assignment['id'] != incoming_strategy_id:
-            logging.warning(
-                'Rejected webhook call: {} sent strategy_id={!r} but the currently active strategy '
-                'for {} is #{} ({}) -- likely a stale alert from before a strategy switch.'.format(
-                    symbol, incoming_strategy_id, symbol, assignment['id'], assignment['name'],
-                )
-            )
-            return jsonify({
-                'error': 'stale strategy_id for {} (active strategy is #{})'.format(symbol, assignment['id'])
-            }), 409
 
     manual_flag = data.get('manual', False)
     try:

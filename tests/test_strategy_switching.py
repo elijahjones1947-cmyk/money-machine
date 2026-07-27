@@ -209,7 +209,10 @@ def test_webhook_without_strategy_id_is_not_gated_at_all(client, db_store):
     assert state.trade_log[-1]["symbol"] == "AAPL"
 
 
-def test_webhook_with_matching_strategy_id_is_processed(client, db_store):
+def test_webhook_with_matching_asset_class_code_is_processed(client, db_store):
+    """The Pine script sends a fixed per-asset-class code (1=stock),
+    not a strategies.id row reference -- any active stock strategy
+    should be accepted regardless of its actual row id."""
     import state
 
     strategy = db.create_strategy("HHB - Stock", {"lookback": 7})
@@ -217,18 +220,38 @@ def test_webhook_with_matching_strategy_id_is_processed(client, db_store):
 
     resp = _post_webhook_and_wait(client, {
         "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
-        "strategy_id": strategy["id"],
+        "strategy_id": 1,
     })
     assert resp.status_code == 202
     assert state.trade_log[-1]["symbol"] == "AAPL"
 
 
-def test_webhook_with_stale_strategy_id_is_rejected_and_never_reaches_the_broker(client, monkeypatch, db_store):
-    import server
+def test_webhook_survives_a_strategy_version_bump_without_a_pine_script_update(client, db_store):
+    """The exact incident that broke forex for a week: reassigning a
+    symbol to a new strategy VERSION (a new strategies.id row) must NOT
+    start rejecting the asset class's alerts, since the Pine script's
+    code (1/2/3) never changes on a version bump -- only a genuine
+    cross-asset-class mismatch should ever be rejected."""
+    import state
 
     old_strategy = db.create_strategy("Old", {"lookback": 5})
+    db.assign_strategy_to_symbol("AAPL", old_strategy["id"])
     new_strategy = db.create_strategy("New", {"lookback": 9})
-    db.assign_strategy_to_symbol("AAPL", new_strategy["id"])  # AAPL has since been switched to `new`
+    db.assign_strategy_to_symbol("AAPL", new_strategy["id"])  # version bump, same asset class
+
+    resp = _post_webhook_and_wait(client, {
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+        "strategy_id": 1,  # Pine's fixed stock code, unchanged since before the bump
+    })
+    assert resp.status_code == 202
+    assert state.trade_log[-1]["symbol"] == "AAPL"
+
+
+def test_webhook_with_wrong_asset_class_code_is_rejected_and_never_reaches_the_broker(client, monkeypatch, db_store):
+    import server
+
+    strategy = db.create_strategy("HHB - Stock", {"lookback": 7})
+    db.assign_strategy_to_symbol("AAPL", strategy["id"])
 
     calls = []
     monkeypatch.setattr(
@@ -238,19 +261,27 @@ def test_webhook_with_stale_strategy_id_is_rejected_and_never_reaches_the_broker
 
     resp = client.post("/webhook", json={
         "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
-        "strategy_id": old_strategy["id"],  # a stale alert still carrying the OLD id
+        "strategy_id": 2,  # forex's code, sent for a stock symbol
     })
     assert resp.status_code == 409
-    assert "stale strategy_id" in resp.get_json()["error"]
+    assert "does not match" in resp.get_json()["error"]
     assert calls == []  # never reached the broker -- rejected synchronously, never queued
 
 
-def test_webhook_with_strategy_id_but_no_assignment_at_all_is_rejected(client, db_store):
-    strategy = db.create_strategy("HHB - Stock", {"lookback": 7})
-    # Deliberately NOT assigning it to any symbol.
+def test_webhook_with_unrecognized_strategy_id_is_rejected(client, db_store):
     resp = client.post("/webhook", json={
         "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
-        "strategy_id": strategy["id"],
+        "strategy_id": 99,
+    })
+    assert resp.status_code == 409
+    assert "unrecognized strategy_id" in resp.get_json()["error"]
+
+
+def test_webhook_with_strategy_id_but_no_assignment_at_all_is_rejected(client, db_store):
+    # A valid stock code, but AAPL deliberately has no assignment at all.
+    resp = client.post("/webhook", json={
+        "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
+        "strategy_id": 1,
     })
     assert resp.status_code == 409
     assert "no active strategy assignment" in resp.get_json()["error"]
@@ -286,7 +317,7 @@ def test_webhook_strategy_id_validation_stays_fast(client, db_store):
     start = time.monotonic()
     resp = client.post("/webhook", json={
         "secret": "test-webhook-secret", "action": "buy", "symbol": "AAPL",
-        "strategy_id": strategy["id"],
+        "strategy_id": 1,
     })
     elapsed = time.monotonic() - start
 
