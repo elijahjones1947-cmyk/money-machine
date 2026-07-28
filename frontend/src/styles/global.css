@@ -29,7 +29,11 @@ button {
   justify-content: space-between;
   padding: 16px 24px;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-elevated);
+  background: linear-gradient(180deg, var(--bg-elevated), var(--bg-elevated) 70%, var(--accent-dim));
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  backdrop-filter: blur(10px);
 }
 
 .topbar-left {
@@ -42,6 +46,11 @@ button {
   font-weight: 800;
   font-size: 18px;
   letter-spacing: -0.02em;
+  background: linear-gradient(120deg, var(--text-primary) 40%, var(--accent) 140%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
 }
 
 /* --- Left-side hamburger button: sole entry point to Settings --- */
@@ -153,8 +162,8 @@ button {
   line-height: 1.1;
 }
 
-.metric-value.positive { color: var(--accent); }
-.metric-value.negative { color: var(--danger); }
+.metric-value.positive { color: var(--accent); text-shadow: 0 0 24px var(--accent-dim); }
+.metric-value.negative { color: var(--danger); text-shadow: 0 0 24px var(--danger-dim); }
 
 .pill {
   display: inline-flex;
@@ -180,18 +189,24 @@ button {
 
 .button {
   border: 1px solid var(--border);
-  background: var(--bg-card);
+  background: var(--card-gradient);
   color: var(--text-primary);
   border-radius: var(--radius-sm);
   padding: 8px 14px;
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s, box-shadow 0.15s;
 }
 
 .button:hover {
   border-color: var(--accent);
+  box-shadow: var(--glow-accent);
+}
+
+.button:active {
+  transform: translateY(1px);
+  box-shadow: none;
 }
 
 .button-accent {
@@ -237,15 +252,46 @@ table.data-table td {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Slow, subtle pulse behind the login card -- a "hero moment" touch
+   since this is the very first thing anyone sees. Kept understated
+   (long duration, low opacity swing) and fully disabled under
+   prefers-reduced-motion below, where it falls back to the static
+   --glow-strong glow with no animation at all. */
+.login-screen::before {
+  content: '';
+  position: absolute;
+  inset: -20%;
+  background: radial-gradient(circle at 50% 40%, var(--accent-dim), transparent 55%);
+  filter: blur(40px);
+  animation: login-glow-pulse 8s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes login-glow-pulse {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.08); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .login-screen::before {
+    animation: none;
+    opacity: 0.8;
+  }
 }
 
 .login-card {
-  background: var(--bg-card);
+  background: var(--card-gradient);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 32px;
   width: 320px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--shadow), var(--glow-strong);
+  position: relative;
+  z-index: 1;
 }
 
 .login-card input {
@@ -262,6 +308,18 @@ table.data-table td {
 .error-text {
   color: var(--danger);
   font-size: 13px;
+}
+
+/* Consistent focus glow across every text input/select/textarea in the
+   app, even the many that set their base border inline (component-level
+   style={{ border: '1px solid var(--border)' }} throughout this
+   codebase) -- inline styles otherwise beat a plain :focus selector's
+   specificity, so !important is the pragmatic, narrowly-scoped way to
+   land one visual detail everywhere without editing every component. */
+input:focus, select:focus, textarea:focus {
+  outline: none !important;
+  border-color: var(--accent) !important;
+  box-shadow: var(--glow-accent);
 }
 
 /* --- Visual overhaul (v2): page headers, cards, charts, calendar heatmap,
@@ -283,6 +341,11 @@ table.data-table td {
   font-weight: 800;
   letter-spacing: -0.02em;
   margin: 0;
+  background: linear-gradient(120deg, var(--text-primary) 40%, var(--accent) 140%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
 }
 
 .page-subtitle {
@@ -292,10 +355,11 @@ table.data-table td {
 }
 
 .card {
-  background: var(--bg-card);
+  background: var(--card-gradient);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 18px;
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.03) inset, 0 12px 24px -16px rgba(0, 0, 0, 0.4);
 }
 
 .section {
@@ -318,13 +382,20 @@ table.data-table td {
 }
 
 .stat-card {
-  background: var(--bg-card);
+  background: var(--card-gradient);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 14px 16px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.03) inset, 0 12px 24px -16px rgba(0, 0, 0, 0.4);
+  transition: border-color 0.2s, transform 0.2s;
+}
+
+.stat-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-2px);
 }
 
 .stat-card .metric-value {
@@ -347,10 +418,11 @@ table.data-table td {
 /* Table wrapped in a card: rounded corners, hover rows, tabular numerals
    for anything numeric, sticky header for long trade histories. */
 .table-card {
-  background: var(--bg-card);
+  background: var(--card-gradient);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   overflow: hidden;
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.03) inset, 0 12px 24px -16px rgba(0, 0, 0, 0.4);
 }
 
 .table-card .data-table {
@@ -362,6 +434,7 @@ table.data-table td {
   top: 0;
   background: var(--bg-card);
   border-bottom: 1px solid var(--border);
+  z-index: 1;
 }
 
 .table-card .data-table tbody tr {

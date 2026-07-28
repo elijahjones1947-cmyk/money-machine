@@ -42,6 +42,23 @@
   --danger-dim: #ff4d6d26;
   --warning: #ffce54;
   --shadow: 0 8px 30px rgba(57, 255, 143, 0.06);
+
+  /* --- Visual polish pass: gradient/glow tokens, additive on top of the
+     flat tokens above (nothing existing renamed/removed) -- see the
+     component CSS files that consume these for where/why. Kept as
+     separate tokens rather than baking gradients directly into --bg/
+     --bg-card so any future theme only has to define these six lines
+     to get the same premium treatment. --- */
+  --bg-gradient:
+    radial-gradient(ellipse 1200px 800px at 15% -10%, #39ff8f14, transparent 60%),
+    radial-gradient(ellipse 1000px 700px at 100% 10%, #39ff8f0a, transparent 55%),
+    var(--bg);
+  --card-gradient: linear-gradient(165deg, #151b23 0%, var(--bg-card) 55%);
+  --card-gradient-hover: linear-gradient(165deg, #1a222b 0%, var(--bg-card) 55%);
+  --glow-accent: 0 0 0 1px #39ff8f33, 0 8px 24px -8px #39ff8f4d;
+  --glow-strong: 0 0 60px -8px #39ff8f4d;
+  --scrollbar-thumb: #1e2733;
+  --scrollbar-thumb-hover: #39ff8f4d;
 }
 
 [data-theme='soft'] {
@@ -58,10 +75,50 @@
   --danger-dim: #ff6f9c26;
   --warning: #ffd479;
   --shadow: 0 8px 30px rgba(179, 136, 255, 0.12);
+
+  --bg-gradient:
+    radial-gradient(ellipse 1200px 800px at 15% -10%, #b388ff22, transparent 60%),
+    radial-gradient(ellipse 1000px 700px at 100% 10%, #ff6f9c14, transparent 55%),
+    var(--bg);
+  --card-gradient: linear-gradient(165deg, #2c2740 0%, var(--bg-card) 55%);
+  --card-gradient-hover: linear-gradient(165deg, #332c4a 0%, var(--bg-card) 55%);
+  --glow-accent: 0 0 0 1px #b388ff33, 0 8px 24px -8px #b388ff59;
+  --glow-strong: 0 0 60px -8px #b388ff59;
+  --scrollbar-thumb: #352f47;
+  --scrollbar-thumb-hover: #b388ff59;
 }
 
 body {
-  background: var(--bg);
+  background: var(--bg-gradient);
+  background-attachment: fixed;
   color: var(--text-primary);
   font-family: var(--font-family);
+}
+
+/* Thin, theme-matched scrollbars wherever content scrolls (webkit) --
+   Firefox gets the standardized fallback right below. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid var(--bg);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }

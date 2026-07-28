@@ -50,7 +50,7 @@
 
 .hermes-message.assistant {
   align-self: flex-start;
-  background: var(--bg-card);
+  background: var(--card-gradient);
   border: 1px solid var(--border);
 }
 
@@ -90,7 +90,7 @@
 }
 
 .hermes-not-configured {
-  background: var(--bg-card);
+  background: var(--card-gradient);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 16px;

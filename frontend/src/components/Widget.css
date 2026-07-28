@@ -1,12 +1,13 @@
 .widget {
-  background: var(--bg-card);
+  background: var(--card-gradient);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  transition: box-shadow 0.15s, border-color 0.15s;
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.03) inset, 0 12px 24px -16px rgba(0, 0, 0, 0.4);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease, transform 0.2s ease, background 0.2s ease;
 }
 
 .widget-link {
@@ -16,7 +17,19 @@
 
 .widget-link:hover .widget {
   border-color: var(--accent);
-  box-shadow: var(--shadow);
+  background: var(--card-gradient-hover);
+  box-shadow: var(--shadow), var(--glow-accent);
+  transform: translateY(-3px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .widget {
+    transition: box-shadow 0.15s, border-color 0.15s;
+  }
+
+  .widget-link:hover .widget {
+    transform: none;
+  }
 }
 
 .widget-header {
