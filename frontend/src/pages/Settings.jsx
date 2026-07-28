@@ -152,7 +152,7 @@ export function Settings() {
       <div className="page-header">
         <div>
           <h1>Settings</h1>
-          <div className="page-subtitle">Risk sizing and watchlist, per asset class.</div>
+          <div className="page-subtitle">Risk sizing and Bucket of Funds, per asset class.</div>
         </div>
       </div>
 
@@ -170,7 +170,7 @@ export function Settings() {
       </div>
 
       <div className="section">
-        <div className="section-title">Watchlist</div>
+        <div className="section-title">Bucket of Funds</div>
         <div className="card">
           {ASSET_CLASSES.map((ac) => (
             <WatchlistRow key={ac} assetClass={ac} symbols={data.watched_symbols[ac] || []} onAdded={refetch} />
