@@ -257,13 +257,29 @@ def run_position_safety_checks():
     """
     risk_config = config.get_risk_config()
     for p in get_all_positions():
+        # Dust positions (config.DUST_POSITION_VALUE_USD -- the same
+        # guard run_intrabar_exit_checks() uses, see its comment for the
+        # original incident) aren't real capital at risk, and Alpaca
+        # rejects a force-close attempt on them outright (a market order
+        # under its per-symbol minimum notional). This job never had that
+        # guard: a dust remnant sitting at a deep unrealized loss on a
+        # fraction-of-a-cent cost basis trips the threshold below every
+        # single time, so without this check it retries a doomed close
+        # every 5 minutes forever. Confirmed live: SOL/USD dust has done
+        # exactly this continuously since 2026-07-15 -- tens of thousands
+        # of failed "computed quantity <= 0" attempts and log rows for a
+        # position worth a fraction of a cent, never a real position left
+        # unprotected.
+        cost_basis = p["qty"] * p["avg_entry"]
+        if cost_basis < config.DUST_POSITION_VALUE_USD:
+            continue
+
         rules = risk_config.get(p["asset_class"], {})
         threshold_pct = rules.get("safety_stop_loss_pct")
         if not threshold_pct:
             continue
 
-        cost_basis = p["qty"] * p["avg_entry"]
-        if cost_basis <= 0 or p["unrealized_pl"] >= 0:
+        if p["unrealized_pl"] >= 0:
             continue
 
         loss_pct = abs(p["unrealized_pl"]) / cost_basis

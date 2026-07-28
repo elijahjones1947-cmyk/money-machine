@@ -976,6 +976,64 @@ def test_safety_net_force_close_and_webhook_signal_for_same_symbol_process_in_ar
     assert execution_order == [("safety_net", "sell"), ("webhook", "buy")]
 
 
+def test_safety_net_skips_a_dust_position_instead_of_retrying_forever(client, monkeypatch, caplog):
+    """The real incident this closes: unlike run_intrabar_exit_checks()
+    (see test_intrabar_exit_checks.py's own dust test, fixed by
+    f8e1e63), this job never had a dust guard at all -- a dust remnant's
+    unrealized P&L is a deep loss PERCENTAGE-wise on its near-zero cost
+    basis (a fraction of a cent of real money can easily read as a
+    "-7% loss"), so it tripped safety_stop_loss_pct on literally every
+    5-minute cycle. Confirmed live: SOL/USD dust has done exactly this
+    continuously since 2026-07-15, 59k+ "computed quantity <= 0" /
+    "did not succeed (status 400)" error rows and counting. A position
+    worth less than config.DUST_POSITION_VALUE_USD must not even attempt
+    a close -- same guard, same threshold, as the intrabar poller."""
+    import server
+    import state
+
+    dust_position = SimpleNamespace(
+        symbol="SOLUSD", asset_class="crypto", qty="5.45e-07",
+        avg_entry_price="78.32", current_price="73.8261", unrealized_pl="-0.0000024",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [dust_position])
+
+    def fail_if_called(symbol, side, size, order_type="market"):
+        raise AssertionError("place_order should never be called for a dust position")
+
+    monkeypatch.setattr(server.alpaca_broker, "place_order", fail_if_called)
+
+    with caplog.at_level(logging.WARNING):
+        server.run_position_safety_checks()  # must not attempt a close, must not raise
+
+    assert state.trade_log == []
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("SAFETY NET" in m for m in messages)
+
+
+def test_safety_net_still_force_closes_a_real_loss_just_above_the_dust_threshold(client, monkeypatch):
+    """Regression guard for the dust-skip above: a genuine (non-dust)
+    losing position must still be force-closed exactly as before --
+    the new cost_basis < DUST_POSITION_VALUE_USD check must not
+    accidentally swallow real losses. cost_basis = 1 * 6.0 = $6.00,
+    just past the $5.00 dust threshold; loss of $3.00 -> 50%, well past
+    stock's 2% paper safety_stop_loss_pct (config.py)."""
+    import server
+    import state
+
+    fake_position = SimpleNamespace(
+        symbol="MSFT", asset_class="us_equity", qty="1",
+        avg_entry_price="6.0", current_price="3.0", unrealized_pl="-3.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    server.run_position_safety_checks()
+
+    last_trade = state.trade_log[-1]
+    assert last_trade["symbol"] == "MSFT"
+    assert last_trade["action"] == "sell"
+    assert last_trade["source"] == "safety_stop_loss"
+
+
 def test_manual_close_and_webhook_signal_for_same_symbol_process_in_arrival_order(client, monkeypatch):
     """Same guarantee, for /api/manual_close: a dashboard operator
     clicking Close and a webhook signal for the same symbol landing at

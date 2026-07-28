@@ -286,6 +286,45 @@ def test_intrabar_poll_skips_a_dust_position_instead_of_retrying_forever(client,
     assert not any("INTRABAR" in m for m in messages)
 
 
+def test_intrabar_poll_skips_a_dust_position_at_a_much_higher_price_scale(client, monkeypatch, caplog):
+    """The dust guard is a DOLLAR-value check (qty * avg_entry), so it
+    must skip dust regardless of the underlying instrument's price scale
+    -- not just at SOL/USD's ~$78. Confirmed live: this exact scenario
+    (ETH/USD dust, entry ~$1953, qty 9.4e-07 -> cost basis ~$0.0018) hit
+    the "did not succeed (status 400)" loop on 2026-07-27 16:15-16:19
+    UTC, but that was the OLD pre-f8e1e63 container still serving in the
+    ~2 minutes before that fix's deploy took over traffic -- zero
+    recurrences for ETH/USD (or any symbol) after the fix went live.
+    This test is the regression guard proving the guard itself, not
+    just the deploy, is what keeps this closed."""
+    import server
+    import state
+
+    _assign_strategy("HHB - Crypto", take_profit_pct=1.0, stop_loss_pct=0.5, symbol="ETH/USD")
+
+    dust_position = SimpleNamespace(
+        symbol="ETHUSD", asset_class="crypto", qty="9.4e-07",
+        avg_entry_price="1952.959978929", current_price="1925.234", unrealized_pl="-0.0000255",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [dust_position])
+    # Deliberately past the stop-loss level -- a real (non-dust) position
+    # at this price WOULD trigger a close.
+    monkeypatch.setattr(server.alpaca_broker, "get_price", lambda symbol: 1925.234)
+
+    def fail_if_called(symbol, side, size, order_type="market"):
+        raise AssertionError("place_order should never be called for a dust position")
+
+    monkeypatch.setattr(server.alpaca_broker, "place_order", fail_if_called)
+
+    with caplog.at_level(logging.WARNING):
+        server.run_intrabar_exit_checks()  # must not attempt a close, must not raise
+
+    assert state.trade_log == []
+    assert "ETH/USD" not in state.peak_price_since_entry
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("INTRABAR" in m for m in messages)
+
+
 def test_intrabar_poll_skips_a_symbol_with_no_assigned_strategy(client, monkeypatch):
     """No take_profit_pct/stop_loss_pct to check against -- must be
     silently skipped, not raise."""
