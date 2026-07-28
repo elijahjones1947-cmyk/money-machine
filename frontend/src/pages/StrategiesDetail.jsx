@@ -4,32 +4,72 @@ import { api } from '../api.js';
 
 const ASSET_CLASSES = ['stock', 'forex', 'crypto'];
 
-const PARAM_FIELDS = [
-  { key: 'lookback', label: 'Lookback (bars)', step: '1' },
-  { key: 'breakout_buffer_pct', label: 'Breakout buffer %', step: '0.01' },
-  { key: 'ema_fast_length', label: 'EMA fast', step: '1' },
-  { key: 'ema_slow_length', label: 'EMA slow', step: '1' },
-  { key: 'take_profit_pct', label: 'Take profit %', step: '0.05' },
-  { key: 'stop_loss_pct', label: 'Stop loss %', step: '0.05' },
-  { key: 'rsi_length', label: 'RSI length', step: '1' },
-  { key: 'rsi_min', label: 'RSI min', step: '1' },
-];
-
-const DEFAULT_PARAMS = {
-  lookback: 7, breakout_buffer_pct: 0.05, ema_fast_length: 9, ema_slow_length: 21,
-  take_profit_pct: 0.6, stop_loss_pct: 0.35, use_rsi_filter: true, rsi_length: 14, rsi_min: 45,
+// Each strategy family has its own param shape -- the create form switches
+// its numeric/boolean fields and defaults based on which family is
+// selected, rather than assuming Higher High Breakout's fields like it
+// used to. Keys/defaults for Kev's ICC match pinescript/kevs_icc_strategy.pine's
+// input.*() defaults (the forex/base tuning -- eqTolerancePct 0.05,
+// slBufferPct 0.05; the Stock (0.10/0.15) and Crypto (0.20/0.35) variants
+// are entered by hand when creating those strategy rows).
+const STRATEGY_FAMILIES = {
+  'Higher High Breakout': {
+    numericFields: [
+      { key: 'lookback', label: 'Lookback (bars)', step: '1' },
+      { key: 'breakout_buffer_pct', label: 'Breakout buffer %', step: '0.01' },
+      { key: 'ema_fast_length', label: 'EMA fast', step: '1' },
+      { key: 'ema_slow_length', label: 'EMA slow', step: '1' },
+      { key: 'take_profit_pct', label: 'Take profit %', step: '0.05' },
+      { key: 'stop_loss_pct', label: 'Stop loss %', step: '0.05' },
+      { key: 'rsi_length', label: 'RSI length', step: '1' },
+      { key: 'rsi_min', label: 'RSI min', step: '1' },
+    ],
+    boolFields: [
+      { key: 'use_rsi_filter', label: 'Use RSI filter' },
+    ],
+    defaultParams: {
+      lookback: 7, breakout_buffer_pct: 0.05, ema_fast_length: 9, ema_slow_length: 21,
+      take_profit_pct: 0.6, stop_loss_pct: 0.35, use_rsi_filter: true, rsi_length: 14, rsi_min: 45,
+    },
+    namePlaceholder: 'e.g. Higher High Breakout - Stock Tight',
+  },
+  "Kev's ICC": {
+    numericFields: [
+      { key: 'pivotLenL', label: 'Pivot lookback (left)', step: '1' },
+      { key: 'pivotLenR', label: 'Pivot lookahead (right)', step: '1' },
+      { key: 'eqTolerancePct', label: 'Equal high/low tolerance %', step: '0.01' },
+      { key: 'dailyPivotLenL', label: 'Daily pivot lookback (left)', step: '1' },
+      { key: 'dailyPivotLenR', label: 'Daily pivot lookahead (right)', step: '1' },
+      { key: 'dailySwingsForBias', label: 'Daily swings for bias', step: '1' },
+      { key: 'slBufferPct', label: 'SL buffer %', step: '0.01' },
+      { key: 'h4PivotHistoryBars', label: '4H pivot history bars', step: '1' },
+    ],
+    boolFields: [
+      { key: 'useDailyFilter', label: 'Use daily trend filter' },
+      { key: 'blockOnIndecision', label: 'Block on indecision' },
+    ],
+    defaultParams: {
+      pivotLenL: 5, pivotLenR: 5, eqTolerancePct: 0.05, useDailyFilter: true,
+      dailyPivotLenL: 3, dailyPivotLenR: 3, dailySwingsForBias: 3, slBufferPct: 0.05,
+      h4PivotHistoryBars: 10, blockOnIndecision: true,
+    },
+    namePlaceholder: "e.g. Kev's ICC (Stock)",
+  },
 };
 
-// Higher High Breakout's own shape gets the tailored one-liner below;
-// anything else (a different strategy family with its own param shape,
-// e.g. Kev's ICC) falls back to a generic key:value listing instead of
-// silently printing "undefined" for keys that shape doesn't have.
+// Each family's own shape gets the tailored one-liner below; anything
+// unrecognized (a param shape from neither family, e.g. hand-edited)
+// falls back to a generic key:value listing instead of silently printing
+// "undefined" for keys that shape doesn't have.
 const HHB_SUMMARY_KEYS = ['lookback', 'breakout_buffer_pct', 'take_profit_pct', 'stop_loss_pct'];
+const ICC_SUMMARY_KEYS = ['pivotLenL', 'pivotLenR', 'eqTolerancePct', 'slBufferPct'];
 
 function paramsSummary(params) {
   if (!params) return '';
   if (HHB_SUMMARY_KEYS.every((k) => k in params)) {
     return `lookback ${params.lookback} · buffer ${params.breakout_buffer_pct}% · TP ${params.take_profit_pct}% · SL ${params.stop_loss_pct}%`;
+  }
+  if (ICC_SUMMARY_KEYS.every((k) => k in params)) {
+    return `pivot ${params.pivotLenL}/${params.pivotLenR} · eq tol ${params.eqTolerancePct}% · SL buffer ${params.slBufferPct}%${params.useDailyFilter === false ? ' · daily filter off' : ''}`;
   }
   const entries = Object.entries(params);
   if (entries.length === 0) return '';
@@ -37,13 +77,21 @@ function paramsSummary(params) {
 }
 
 function CreateStrategyForm({ onCreated }) {
+  const familyNames = Object.keys(STRATEGY_FAMILIES);
+  const [familyName, setFamilyName] = useState(familyNames[0]);
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [params, setParams] = useState(DEFAULT_PARAMS);
+  const [params, setParams] = useState(STRATEGY_FAMILIES[familyNames[0]].defaultParams);
   const [status, setStatus] = useState(null);
   const [open, setOpen] = useState(false);
 
+  const family = STRATEGY_FAMILIES[familyName];
   const setParam = (key, value) => setParams((p) => ({ ...p, [key]: value }));
+
+  const changeFamily = (nextFamilyName) => {
+    setFamilyName(nextFamilyName);
+    setParams(STRATEGY_FAMILIES[nextFamilyName].defaultParams);
+  };
 
   const create = async (e) => {
     e.preventDefault();
@@ -51,11 +99,11 @@ function CreateStrategyForm({ onCreated }) {
     setStatus('saving');
     try {
       const numericParams = { ...params };
-      for (const f of PARAM_FIELDS) numericParams[f.key] = Number(params[f.key]);
+      for (const f of family.numericFields) numericParams[f.key] = Number(params[f.key]);
       await api.createStrategy(name.trim(), numericParams, description.trim() || undefined);
       setName('');
       setDescription('');
-      setParams(DEFAULT_PARAMS);
+      setParams(family.defaultParams);
       setStatus(null);
       setOpen(false);
       onCreated();
@@ -77,9 +125,18 @@ function CreateStrategyForm({ onCreated }) {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 180 }}>
+            <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Strategy family</label>
+            <select
+              value={familyName} onChange={(e) => changeFamily(e.target.value)}
+              style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-primary)', padding: '6px 8px', borderRadius: 8 }}
+            >
+              {familyNames.map((fn) => <option key={fn} value={fn}>{fn}</option>)}
+            </select>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, flex: 1, minWidth: 180 }}>
             <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Name</label>
             <input
-              value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Higher High Breakout - Stock Tight"
+              value={name} onChange={(e) => setName(e.target.value)} placeholder={family.namePlaceholder}
               style={{ background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text-primary)', padding: '6px 8px', borderRadius: 8 }}
             />
           </div>
@@ -92,7 +149,7 @@ function CreateStrategyForm({ onCreated }) {
           </div>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 12 }}>
-          {PARAM_FIELDS.map((f) => (
+          {family.numericFields.map((f) => (
             <div key={f.key} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
               <label style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{f.label}</label>
               <input
@@ -102,13 +159,15 @@ function CreateStrategyForm({ onCreated }) {
               />
             </div>
           ))}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <input
-              type="checkbox" checked={params.use_rsi_filter}
-              onChange={(e) => setParam('use_rsi_filter', e.target.checked)}
-            />
-            <label style={{ fontSize: 12 }}>Use RSI filter</label>
-          </div>
+          {family.boolFields.map((f) => (
+            <div key={f.key} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input
+                type="checkbox" checked={!!params[f.key]}
+                onChange={(e) => setParam(f.key, e.target.checked)}
+              />
+              <label style={{ fontSize: 12 }}>{f.label}</label>
+            </div>
+          ))}
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
           <button className="button button-accent" type="submit" disabled={status === 'saving'}>
