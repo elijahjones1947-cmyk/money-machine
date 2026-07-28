@@ -1747,6 +1747,53 @@ def api_assign_strategy():
     })
 
 
+@app.route('/api/notes', methods=['GET', 'POST'])
+def api_notes():
+    """Session-gated (dashboard only). GET lists every note, newest
+    first; POST creates a new one. Pure free-text scratch space -- no
+    trading logic anywhere reads or writes this table. Notes persist
+    indefinitely by design (see db.init_schema()'s notes table comment):
+    no expiry, no scheduled cleanup, the only way one goes away is an
+    explicit DELETE below."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+
+    if request.method == 'POST':
+        data = request.json or {}
+        content = (data.get('content') or '').strip()
+        if not content:
+            return jsonify({'error': 'content is required'}), 400
+        try:
+            note = db.create_note(content)
+        except Exception as e:
+            logging.error('Could not create note: {}'.format(e))
+            return jsonify({'error': 'failed to create note'}), 500
+        return jsonify(note), 201
+
+    try:
+        notes = db.list_notes()
+    except Exception as e:
+        logging.error('Could not list notes: {}'.format(e))
+        return jsonify({'error': 'failed to list notes'}), 500
+    return jsonify({'notes': notes})
+
+
+@app.route('/api/notes/<int:note_id>', methods=['DELETE'])
+def api_delete_note(note_id):
+    """Session-gated. The only way a note ever goes away -- explicit,
+    operator-initiated, no auto-expiry anywhere in this feature."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+    try:
+        deleted = db.delete_note(note_id)
+    except Exception as e:
+        logging.error('Could not delete note {}: {}'.format(note_id, e))
+        return jsonify({'error': 'failed to delete note'}), 500
+    if not deleted:
+        return jsonify({'error': 'no such note: {}'.format(note_id)}), 404
+    return jsonify({'status': 'deleted', 'id': note_id})
+
+
 @app.route('/api/manual_trade', methods=['POST'])
 def api_manual_trade():
     """SPA-facing route for the dashboard's manual buy/sell buttons — gated

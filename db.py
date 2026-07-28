@@ -238,6 +238,21 @@ def init_schema():
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_strategies_name_version ON strategies (name, version DESC);
             """)
+            # Free-text scratch notes -- pure dashboard convenience, no
+            # trading logic reads or writes this table. Persist
+            # indefinitely by design: no expiry column, no scheduled
+            # cleanup job anywhere. A note only ever goes away via an
+            # explicit DELETE from an operator (see delete_note() below).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS notes (
+                    id SERIAL PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_notes_created_at ON notes (created_at DESC);
+            """)
 
 
 # --- Trades -----------------------------------------------------------
@@ -629,3 +644,38 @@ def backfill_timeframe_for_strategy_name(name, timeframe):
                 "UPDATE strategies SET timeframe = %s WHERE name = %s AND timeframe IS NULL;",
                 (timeframe, name),
             )
+
+
+# --- Notes --------------------------------------------------------------
+
+def create_note(content):
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO notes (content)
+                VALUES (%s)
+                RETURNING id, content, created_at;
+                """,
+                (content,),
+            )
+            return dict(cur.fetchone())
+
+
+def list_notes():
+    """Newest first -- matches every other feed in this app (trades,
+    errors, equity history)."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, content, created_at FROM notes ORDER BY created_at DESC;")
+            return [dict(r) for r in cur.fetchall()]
+
+
+def delete_note(note_id):
+    """Returns True if a row was actually deleted, False if note_id
+    didn't exist -- lets the route tell a real delete apart from a
+    no-op and answer with 404 instead of a false-positive 200."""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM notes WHERE id = %s;", (note_id,))
+            return cur.rowcount > 0

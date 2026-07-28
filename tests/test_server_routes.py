@@ -1658,3 +1658,53 @@ def test_real_crypto_position_blocks_a_new_entry_via_webhook(client, monkeypatch
     assert resp.status_code == 202  # queued regardless -- rejection happens in the background, see webhook()'s docstring
     messages = [r.getMessage() for r in caplog.records]
     assert any("already holds an open long position" in m for m in messages)
+
+
+# --- Notes (dashboard scratch space -- no trading logic involved) -----
+
+def test_notes_requires_auth(client):
+    assert client.get("/api/notes").status_code == 401
+    assert client.post("/api/notes", json={"content": "hi"}).status_code == 401
+    assert client.delete("/api/notes/1").status_code == 401
+
+
+def test_notes_create_list_delete_round_trip(auth_client):
+    list_resp = auth_client.get("/api/notes")
+    assert list_resp.status_code == 200
+    assert list_resp.get_json() == {"notes": []}
+
+    create_resp = auth_client.post("/api/notes", json={"content": "check OANDA creds Monday"})
+    assert create_resp.status_code == 201
+    created = create_resp.get_json()
+    assert created["content"] == "check OANDA creds Monday"
+    assert "id" in created and "created_at" in created
+
+    list_resp = auth_client.get("/api/notes")
+    notes = list_resp.get_json()["notes"]
+    assert len(notes) == 1
+    assert notes[0]["content"] == "check OANDA creds Monday"
+
+    delete_resp = auth_client.delete("/api/notes/{}".format(created["id"]))
+    assert delete_resp.status_code == 200
+    assert delete_resp.get_json() == {"status": "deleted", "id": created["id"]}
+
+    assert auth_client.get("/api/notes").get_json() == {"notes": []}
+
+
+def test_notes_lists_newest_first(auth_client):
+    auth_client.post("/api/notes", json={"content": "first"})
+    auth_client.post("/api/notes", json={"content": "second"})
+
+    notes = auth_client.get("/api/notes").get_json()["notes"]
+    assert [n["content"] for n in notes] == ["second", "first"]
+
+
+def test_notes_create_rejects_empty_content(auth_client):
+    resp = auth_client.post("/api/notes", json={"content": "   "})
+    assert resp.status_code == 400
+    assert auth_client.get("/api/notes").get_json() == {"notes": []}
+
+
+def test_notes_delete_nonexistent_returns_404(auth_client):
+    resp = auth_client.delete("/api/notes/999")
+    assert resp.status_code == 404

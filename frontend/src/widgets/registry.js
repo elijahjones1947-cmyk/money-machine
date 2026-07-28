@@ -5,6 +5,7 @@ import { RegimeWidget } from './RegimeWidget.jsx';
 import { BacktestWidget } from './BacktestWidget.jsx';
 import { HermesControlWidget } from './HermesControlWidget.jsx';
 import { EquityWidget } from './EquityWidget.jsx';
+import { NotesWidget } from './NotesWidget.jsx';
 
 // Single source of truth for every widget the dashboard grid knows
 // about: id, display title, its summary component, and the detail page
@@ -17,6 +18,7 @@ export const WIDGET_REGISTRY = {
   backtest: { title: 'Backtest & live', Component: BacktestWidget, to: '/backtest' },
   hermes: { title: 'Hermes', Component: HermesControlWidget, to: null },
   equity: { title: 'Equity', Component: EquityWidget, to: '/equity' },
+  notes: { title: 'Notes', Component: NotesWidget, to: '/notes' },
 };
 
-export const DEFAULT_WIDGET_IDS = ['equity', 'positions', 'risk', 'tradelog', 'regime', 'backtest', 'hermes'];
+export const DEFAULT_WIDGET_IDS = ['equity', 'positions', 'risk', 'tradelog', 'regime', 'backtest', 'hermes', 'notes'];

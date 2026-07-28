@@ -70,4 +70,9 @@ export const api = {
     request('/api/hermes/chat', { method: 'POST', body: JSON.stringify({ message }) }),
   hermesConfirm: (confirm) =>
     request('/api/hermes/confirm', { method: 'POST', body: JSON.stringify({ confirm }) }),
+
+  listNotes: () => request('/api/notes'),
+  createNote: (content) =>
+    request('/api/notes', { method: 'POST', body: JSON.stringify({ content }) }),
+  deleteNote: (id) => request(`/api/notes/${id}`, { method: 'DELETE' }),
 };

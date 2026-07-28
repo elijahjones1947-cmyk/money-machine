@@ -254,6 +254,22 @@ def _dispatch(store, sql_upper, params, as_dict):
             })
         return rows
 
+    if sql_upper.startswith("INSERT INTO NOTES"):
+        (content,) = params
+        new_id = (max((r["id"] for r in store["notes"]), default=0)) + 1
+        row = {"id": new_id, "content": content, "created_at": datetime.now(timezone.utc)}
+        store["notes"].append(row)
+        return [dict(row)]
+
+    if sql_upper.startswith("SELECT ID, CONTENT, CREATED_AT FROM NOTES"):
+        return [dict(r) for r in sorted(store["notes"], key=lambda r: r["created_at"], reverse=True)]
+
+    if sql_upper.startswith("DELETE FROM NOTES"):
+        (note_id,) = params
+        before = len(store["notes"])
+        store["notes"][:] = [r for r in store["notes"] if r["id"] != note_id]
+        return [{"deleted": True}] if len(store["notes"]) < before else []
+
     raise AssertionError("Fake DB got an unrecognized query: {!r}".format(sql_upper))
 
 
@@ -262,6 +278,7 @@ class _FakeCursor:
         self._store = store
         self._as_dict = as_dict
         self._rows = []
+        self.rowcount = 0
 
     def __enter__(self):
         return self
@@ -272,6 +289,7 @@ class _FakeCursor:
     def execute(self, query, params=None):
         sql_upper = " ".join(query.split()).upper()
         self._rows = _dispatch(self._store, sql_upper, params or (), self._as_dict)
+        self.rowcount = len(self._rows)
 
     def fetchone(self):
         return self._rows[0] if self._rows else None
@@ -317,7 +335,7 @@ class _FakePool:
 # db_store fixture for seeding/asserting on persisted data directly.
 _DB_STORE = {
     "trades": [], "equity_history": [], "settings": {}, "regimes": {}, "errors": [],
-    "webhook_signals": [], "strategies": [], "symbol_strategy_assignments": {},
+    "webhook_signals": [], "strategies": [], "symbol_strategy_assignments": {}, "notes": [],
 }
 
 # Injected before server.py (or anything importing it) ever runs --
