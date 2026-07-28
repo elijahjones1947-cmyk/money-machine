@@ -262,7 +262,14 @@ def _dispatch(store, sql_upper, params, as_dict):
         return [dict(row)]
 
     if sql_upper.startswith("SELECT ID, CONTENT, CREATED_AT FROM NOTES"):
-        return [dict(r) for r in sorted(store["notes"], key=lambda r: r["created_at"], reverse=True)]
+        # (created_at, id) tiebreak, not created_at alone -- two notes
+        # created back-to-back in the same test can land on the exact
+        # same datetime.now(timezone.utc) value under load (observed
+        # flakily failing test_notes_lists_newest_first), and Python's
+        # sort is stable, so reverse=True on a tie would otherwise keep
+        # the OLDER note first instead of newest-first. id always
+        # increments in insertion order, so it's a reliable tiebreaker.
+        return [dict(r) for r in sorted(store["notes"], key=lambda r: (r["created_at"], r["id"]), reverse=True)]
 
     if sql_upper.startswith("DELETE FROM NOTES"):
         (note_id,) = params
