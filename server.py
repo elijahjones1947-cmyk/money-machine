@@ -10,6 +10,7 @@ import alerts
 import webhook_queue
 import trade_explanations
 import patterns
+import strategy_knowledge
 from apscheduler.schedulers.background import BackgroundScheduler
 from errors import InsufficientFundsError, MarketClosedError, InvalidSymbolError, BrokerConnectionError
 from brokers.alpaca_broker import AlpacaBroker
@@ -309,6 +310,25 @@ def run_position_safety_checks():
 
 
 _INTRABAR_POLL_INTERVAL_SECONDS = 20
+
+
+# PROPOSED default, PENDING Eli's confirmation -- see /api/dashboard's
+# ICC position-age flag. Reasoning: ICC entries only trigger after a
+# 3-stage 4H-candle-CLOSE-confirmed sequence (Indication/Correction/
+# Continuation -- strategy_knowledge.py's ICC_ENTRY_RULES), and targets
+# are STRUCTURAL (the next daily reaction zone, or the next opposing 4H
+# level if the daily filter's off), not a fixed percentage the way
+# HHB's take_profit_pct/stop_loss_pct is -- so a "normal" ICC hold is
+# inherently longer and less predictable than HHB's, which this bot's
+# own trade history shows typically resolving within a single day
+# against fixed TP/SL on a 30m timeframe. No live ICC position has ever
+# existed to measure a real hold-time distribution from, and this repo
+# has no Python port of ICC's signal logic to backtest offline the way
+# HHB's is (backtest/strategy.py) -- so 10 trading days here is a
+# structural-reasoning starting anchor, not a backtested number. Change
+# this the moment Eli has a real one; it's read fresh on every
+# /api/dashboard call, not cached.
+ICC_POSITION_AGE_FLAG_HOURS = 24 * 10  # 10 trading days
 
 
 def run_intrabar_exit_checks():
@@ -855,6 +875,26 @@ def get_all_positions():
     return positions
 
 
+def _find_entry_trade(symbol, asset_class, direction):
+    """Most recent trade_log entry that OPENED the currently-held
+    position for (symbol, asset_class, direction) -- 'buy' for a long,
+    'sell' for a short (forex only, see get_all_positions' direction
+    field). Same lookup _process_trade_signal already does to attribute
+    pnl on close (search backwards since the newest matching entry is
+    the one that opened what's still open now), factored out here so
+    /api/dashboard's position-age fields (hours_open, the ICC age flag)
+    can reuse it instead of duplicating the scan. Returns None if no
+    matching entry is in this process's trade_log -- e.g. the position
+    pre-dates this process (a restart happened while it was open) or was
+    opened by a manual broker action outside this app entirely."""
+    entry_action = 'buy' if direction == 'long' else 'sell'
+    return next(
+        (t for t in reversed(state.trade_log)
+         if t['action'] == entry_action and t['symbol'] == symbol and t['asset_class'] == asset_class),
+        None
+    )
+
+
 def get_combined_equity():
     """Best-effort combined equity across DISTINCT brokers. Stock and
     crypto share the same Alpaca account/equity, so we dedupe by broker
@@ -966,11 +1006,39 @@ def api_dashboard():
     for p in raw_positions:
         price_fmt = '{:.5f}' if p['asset_class'] == 'forex' else '{:.4f}' if p['asset_class'] == 'crypto' else '{:.2f}'
         signed_qty = p['qty'] if p['direction'] == 'long' else -p['qty']
+
+        # hours_open + the ICC age flag -- see ICC_POSITION_AGE_FLAG_HOURS's
+        # own comment for why this only applies to Kev's ICC positions
+        # (HHB has its own missed-TP backstop already, the intrabar
+        # poller; ICC currently doesn't, hence this being purely a
+        # visual heads-up, not an auto-close).
+        hours_open = None
+        entry_trade = _find_entry_trade(p['symbol'], p['asset_class'], p['direction'])
+        if entry_trade is not None:
+            try:
+                entry_time = datetime.datetime.fromisoformat(entry_trade['time'])
+                hours_open = round((datetime.datetime.now(datetime.timezone.utc) - entry_time).total_seconds() / 3600, 1)
+            except (KeyError, ValueError):
+                hours_open = None
+
+        icc_stale = False
+        try:
+            assignment = db.get_symbol_strategy_assignment(p['symbol'])
+        except Exception:
+            assignment = None
+        if (
+            assignment is not None and assignment.get('name') == strategy_knowledge.ICC_STRATEGY_NAME
+            and hours_open is not None and hours_open >= ICC_POSITION_AGE_FLAG_HOURS
+        ):
+            icc_stale = True
+
         positions.append({
             'symbol': p['symbol'], 'qty': signed_qty, 'asset_class': p['asset_class'],
             'avg_entry': price_fmt.format(p['avg_entry']),
             'current_price': price_fmt.format(p['current_price']) if p['current_price'] is not None else '—',
             'unrealized_pl': round(p['unrealized_pl'], 2),
+            'hours_open': hours_open,
+            'icc_stale': icc_stale,
         })
 
     completed = [t for t in state.trade_log if t.get('pnl') is not None]
@@ -996,6 +1064,30 @@ def api_dashboard():
                 'adx': r['adx'] if r else None,
                 'bb_width_pct': r['volatility'] if r else None,
                 'recorded_at': r['recorded_at'].isoformat() if r and r.get('recorded_at') else None,
+            })
+
+    # Per-symbol alert health -- last_webhook_at is set for EVERY inbound
+    # /webhook call for that symbol regardless of secret validity (see
+    # state.py), same source alerts.check_and_alert_webhook_silence()
+    # already uses for its Discord alert. `stale` reuses that EXACT same
+    # threshold/market-hours gate (alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS,
+    # alerts._is_market_hours) rather than inventing a second number here
+    # that could drift from what actually triggers the Discord alert --
+    # a symbol only ever shows stale on the dashboard when it would also
+    # be eligible to alert (or already has).
+    alert_health = []
+    now_ts = time.time()
+    for asset_class, symbols in state.watched_symbols.items():
+        market_open = alerts._is_market_hours(asset_class)
+        for sym in symbols:
+            last = state.last_webhook_at.get(sym)
+            silent_for = (now_ts - last) if last is not None else None
+            alert_health.append({
+                'symbol': sym,
+                'asset_class': asset_class,
+                'last_webhook_at': datetime.datetime.fromtimestamp(last, tz=datetime.timezone.utc).isoformat() if last is not None else None,
+                'silent_for_seconds': round(silent_for) if silent_for is not None else None,
+                'stale': bool(market_open and silent_for is not None and silent_for >= alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS),
             })
 
     return jsonify({
@@ -1028,7 +1120,60 @@ def api_dashboard():
         },
         'regimes': regimes,
         'risk_caps': state.risk_caps,  # live/editable, not the static config.py defaults -- see Settings
+        'alert_health': alert_health,
     })
+
+
+# Message substrings unique to the dust-position force-close loop fixed by
+# run_position_safety_checks()'s and run_intrabar_exit_checks()'s
+# config.DUST_POSITION_VALUE_USD guards -- "computed quantity <= 0" only
+# ever comes from AlpacaBroker.place_order flooring a sub-lot-size qty to
+# zero (brokers/alpaca_broker.py), which cannot happen for a real order,
+# so it's safe to always exclude. "force-close for" + "did not succeed"
+# is scoped to the safety-net/intrabar force-close failure messages
+# specifically (NOT the separate 'STRATEGY SWITCH ... ABORTED' force-
+# close failure, a genuinely different, rare, operator-facing event that
+# must never be hidden) -- see run_position_safety_checks()/
+# run_intrabar_exit_checks()'s own docstrings for the incident this
+# guards against. Exclusion, not just de-prioritization, per Eli's ask:
+# if this guard ever regresses, the noise is still fully suppressed here
+# rather than merely pushed down the list.
+_DUST_NOISE_SUBSTRINGS = ("computed quantity <= 0",)
+_DUST_NOISE_PAIRS = (("force-close for", "did not succeed"),)
+
+
+def _is_dust_noise(message):
+    if any(s in message for s in _DUST_NOISE_SUBSTRINGS):
+        return True
+    return any(a in message and b in message for a, b in _DUST_NOISE_PAIRS)
+
+
+@app.route('/api/errors')
+def api_errors():
+    """Session-gated. Recent error_log rows for the dashboard's error
+    feed, newest first -- same table discord_bot.py already reads from,
+    just exposed to the SPA too. Dust-position noise (see
+    _is_dust_noise above) is filtered out here, server-side, so every
+    caller (this route, any future one) gets the same clean feed rather
+    than each having to remember to filter it themselves."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+    limit = request.args.get('limit', default=20, type=int)
+    try:
+        # Over-fetch before filtering so a real gap doesn't appear if the
+        # tail of the raw window happens to be dust-noise-heavy.
+        rows = db.get_recent_errors(limit=max(limit * 3, limit))
+    except Exception as e:
+        logging.error('Could not list recent errors: {}'.format(e))
+        return jsonify({'error': 'failed to list errors'}), 500
+    filtered = [r for r in rows if not _is_dust_noise(r['message'])][:limit]
+    return jsonify({'errors': [
+        {
+            'occurred_at': r['occurred_at'].isoformat() if r.get('occurred_at') else None,
+            'level': r['level'], 'source': r['source'], 'message': r['message'],
+        }
+        for r in filtered
+    ]})
 
 
 @app.route('/api/toggle_bot', methods=['POST'])
@@ -2243,6 +2388,7 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
                     action, symbol, asset_class, price, source, entry_trade=entry_trade,
                     params=strategy_params, broker=broker,
                     timeframe=_REGIME_TIMEFRAMES.get(asset_class, '1h'),
+                    strategy_name=strategy_assignment['name'] if strategy_assignment else None,
                 )
             else:
                 # A forex 'sell' with reduces_position False means our own
@@ -2283,6 +2429,7 @@ def _process_trade_signal(action, symbol, is_manual, source='webhook', force_clo
                 explanation = trade_explanations.explain_entry(
                     action, symbol, asset_class, price, signal, strategy_params,
                     is_manual=is_manual, is_short=is_short, detected_patterns=detected_patterns,
+                    strategy_name=strategy_assignment['name'] if strategy_assignment else None,
                 )
         except Exception as e:
             logging.warning('Could not generate trade explanation for {} {} {}: {}'.format(action, asset_class, symbol, e))

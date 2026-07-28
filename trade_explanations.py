@@ -21,7 +21,22 @@ reused rather than recomputed.
 Exit explanations (explain_exit) are a best-effort INFERENCE, not an
 authoritative report -- see that function's docstring for exactly why,
 and its limits.
+
+Kev's ICC gets its own, separate branch in both explain_entry and
+explain_exit (see _explain_icc_entry/_explain_icc_exit below): its
+entry conditions (Indication/Correction/Continuation structure) and
+exits (price-level stop/limit, not a percentage) aren't modeled by
+backtest.strategy.compute_signals() or classify_exit_reason() at all --
+that Python port is HHB-only (see CLAUDE.md). Rather than let ICC fall
+through into HHB's clause-by-clause rationale (which would silently
+read every one of its `signal.get(...)` checks as absent and produce a
+degraded "no rule conditions were evaluable yet" message that reads
+like a bug), ICC gets an honest, factual-snapshot message instead --
+same "this family isn't rule-modeled in Python" framing already used
+for a forex short entry below.
 """
+
+import strategy_knowledge
 
 
 def _fmt_price(price, asset_class):
@@ -63,14 +78,42 @@ def _pattern_clauses(detected_patterns):
     return clauses
 
 
+def _explain_icc_entry(action, price_str, origin, params, is_manual):
+    """ICC's own entry branch -- see the module docstring for why this
+    doesn't go through the HHB clause-by-clause path at all. `action`
+    maps directly to direction here ('buy' -> long, 'sell' -> short)
+    since ICC's Pine script fires a real strategy.entry() on EITHER
+    side as a first-class case (unlike HHB, where a forex 'sell' is a
+    netting-driven reinterpretation of the same long-only alert
+    convention -- see is_short in explain_entry above)."""
+    direction = "long" if action == "buy" else "short"
+    sl_buffer = params.get("slBufferPct")
+    daily_filter = params.get("useDailyFilter")
+    clause = (
+        "TradingView's own Indication/Correction/Continuation structure confirmed a {} continuation "
+        "(3 consecutive 4H candle closes) -- stop-loss buffer {}% beyond the Correction extreme{}. "
+        "Python-side rule verification isn't available for this strategy family (no signal port "
+        "exists the way HHB's backtest.strategy.compute_signals() is), so this is a factual "
+        "snapshot of the trade and its params, not a re-derived rationale.".format(
+            direction,
+            sl_buffer if sl_buffer is not None else "?",
+            " with the daily trend filter on" if daily_filter else " with the daily trend filter off",
+        )
+    )
+    return "Entered {}{}: at {}. {}".format(direction, origin, price_str, clause)
+
+
 def explain_entry(action, symbol, asset_class, price, signal, params, is_manual=False, is_short=False,
-                   detected_patterns=None):
+                   detected_patterns=None, strategy_name=None):
     """
     action: 'buy' or 'sell' -- 'sell' here means a SHORT entry (forex
-        only; stock/crypto never short in this app), not a closing sell.
+        only for HHB; stock/crypto never short in this app -- ICC can
+        short on any asset class it's assigned to, see is_short below),
+        not a closing sell.
     signal: server._compute_current_signal()'s return value (a dict from
         backtest.strategy.compute_signals(), or None if it couldn't be
         computed -- e.g. a broker error, or not enough bar history yet).
+        Ignored entirely for an ICC entry -- see strategy_name below.
     params: the strategy params dict this signal was computed with
         (db.get_symbol_strategy_assignment(symbol)['params'], falling
         back to backtest.strategy.DEFAULT_PARAMS if the symbol has no
@@ -84,18 +127,31 @@ def explain_entry(action, symbol, asset_class, price, signal, params, is_manual=
         conditions (that's what the live Pine script's alert() calls
         this repo can observe actually gate on), so a short entry has no
         rule-based rationale to report, only a factual indicator
-        snapshot.
+        snapshot. NOT used for ICC (see strategy_name/_explain_icc_entry
+        above) -- ICC derives direction straight from `action` instead,
+        since a short is a first-class entry for it on any asset class,
+        not an HHB-style forex-netting reinterpretation.
     detected_patterns: patterns.analyze_patterns()'s return value, or
         None if pattern detection wasn't run/failed -- folded in as
         SUPPORTING context alongside the breakout/EMA/RSI rationale,
         never as a replacement for it (candlestick/Fibonacci patterns
         aren't part of the strategy's own entry conditions, so they
         never appear as a "did NOT confirm" clause the way the real
-        gating conditions do).
+        gating conditions do). Not used for ICC.
+    strategy_name: the assigned strategy's `name` (db.get_symbol_
+        strategy_assignment(symbol)['name']), or None if unassigned.
+        Routes to _explain_icc_entry when it's Kev's ICC; everything
+        else (including an unassigned/None symbol, which defaults to
+        HHB's own param shape via STRATEGY_DEFAULT_PARAMS) falls through
+        to the existing HHB clause-by-clause rationale below unchanged.
     """
-    prefix = "Entered long" if action == "buy" and not is_short else "Entered short"
-    origin = " (manual)" if is_manual else ""
     price_str = _fmt_price(price, asset_class)
+    origin = " (manual)" if is_manual else ""
+
+    if strategy_name == strategy_knowledge.ICC_STRATEGY_NAME:
+        return _explain_icc_entry(action, price_str, origin, params, is_manual)
+
+    prefix = "Entered long" if action == "buy" and not is_short else "Entered short"
     pattern_clauses = _pattern_clauses(detected_patterns)
 
     if is_short:
@@ -304,7 +360,7 @@ _EXIT_REASON_LABELS = {
 
 
 def explain_exit(action, symbol, asset_class, price, source, entry_trade=None, params=None,
-                  broker=None, timeframe="1h"):
+                  broker=None, timeframe="1h", strategy_name=None):
     """
     action: 'sell' (closing a long) or 'buy' (closing a short, forex only).
     source: 'webhook' | 'manual' | 'manual_close' | 'safety_stop_loss' --
@@ -312,12 +368,17 @@ def explain_exit(action, symbol, asset_class, price, source, entry_trade=None, p
         means. manual_close and safety_stop_loss already have a
         DEFINITIVE, non-inferred reason (an operator clicked Close, or
         the safety-net threshold was breached) -- no classification
-        needed or attempted for those. 'manual' (a dashboard sell button)
-        is also operator-initiated, not signal-driven, so it gets the
-        same treatment. Only 'webhook' -- a real TradingView-driven exit
-        -- needs classify_exit_reason(), because the live webhook payload
-        itself never says WHICH exit condition fired (see the module
-        docstring's broader note on why this is an inference).
+        needed or attempted for those, and none of that depends on which
+        strategy family is involved, so strategy_name is IGNORED for
+        every source except 'webhook'. 'manual' (a dashboard sell
+        button) is also operator-initiated, not signal-driven, so it
+        gets the same treatment. Only 'webhook' -- a real TradingView-
+        driven exit -- needs classify_exit_reason(), because the live
+        webhook payload itself never says WHICH exit condition fired
+        (see the module docstring's broader note on why this is an
+        inference) -- and classify_exit_reason() is HHB-specific
+        (needs take_profit_pct/stop_loss_pct, which ICC's params don't
+        have), so THAT'S where strategy_name actually branches.
     entry_trade: the trade_log dict this position was opened with (found
         via the same lookup _process_trade_signal already does for pnl
         attribution), or None if no matching entry could be found (e.g.
@@ -329,6 +390,9 @@ def explain_exit(action, symbol, asset_class, price, source, entry_trade=None, p
     broker/timeframe: used ONLY for the 'webhook' classification path,
         to fetch the extreme price reached during the hold -- never
         called for the other sources, which don't need it.
+    strategy_name: the assigned strategy's `name`, or None if
+        unassigned -- see explain_entry's own docstring for the same
+        param. Only consulted on the 'webhook' path (see `source` above).
     """
     price_str = _fmt_price(price, asset_class)
 
@@ -349,6 +413,35 @@ def explain_exit(action, symbol, asset_class, price, source, entry_trade=None, p
 
     # source == 'webhook' from here -- a real TradingView-driven exit,
     # needs actual classification.
+
+    if strategy_name == strategy_knowledge.ICC_STRATEGY_NAME:
+        # classify_exit_reason() is HHB-specific math (needs a fixed
+        # take_profit_pct/stop_loss_pct to compute price levels FROM --
+        # ICC's own exits are ALREADY price levels, set directly by
+        # Pine's strategy.exit(stop=slLevel, limit=tpLevel), so there's
+        # nothing to re-derive). Report what's actually known -- the
+        # real pct move -- rather than either running (wrong) HHB math
+        # against ICC's params or falling into the generic "couldn't be
+        # classified" message, which would misleadingly imply a failure
+        # rather than "this family's exits work differently."
+        entry_price = None
+        try:
+            if entry_trade is not None:
+                entry_price = float(entry_trade["price"])
+        except (KeyError, TypeError, ValueError):
+            entry_price = None
+        pct_str = ""
+        if entry_price:
+            sign = 1 if action == "sell" else -1
+            pct_change = sign * (price - entry_price) / entry_price * 100
+            pct_str = " ({}{:.2f}%)".format("+" if pct_change >= 0 else "", pct_change)
+        return (
+            "Exited via TradingView's own stop/limit order at {}{} -- ICC's exits are broker-side "
+            "price levels set at entry (Pine's strategy.exit stop/limit), not a percentage the "
+            "Python side re-derives, so this isn't classified as take-profit vs. stop-loss the way "
+            "HHB's exits are.".format(price_str, pct_str)
+        )
+
     if entry_trade is None or params is None:
         return (
             "Exited at {} -- entry details unavailable, so the exit reason (take-profit / "

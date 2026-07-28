@@ -121,3 +121,67 @@ def test_patterns_shown_on_short_entries_too():
     text = te.explain_entry("sell", "EUR_USD", "forex", 1.0855, _full_signal(), DEFAULT_PARAMS,
                              is_short=True, detected_patterns=patterns)
     assert "shooting star" in text
+
+
+# --- Kev's ICC entries (own branch, not HHB's clause-by-clause path) ----
+
+ICC_PARAMS = {
+    "pivotLenL": 5, "pivotLenR": 5, "eqTolerancePct": 0.05, "useDailyFilter": True,
+    "dailyPivotLenL": 3, "dailyPivotLenR": 3, "dailySwingsForBias": 3, "slBufferPct": 0.05,
+    "h4PivotHistoryBars": 10, "blockOnIndecision": True,
+}
+
+
+def test_icc_long_entry_is_a_factual_snapshot_not_hhb_clauses():
+    text = te.explain_entry("buy", "SMR", "stock", 34.5, None, ICC_PARAMS, strategy_name="Kev's ICC")
+    assert text.startswith("Entered long:")
+    assert "Indication/Correction/Continuation" in text
+    assert "0.05%" in text  # slBufferPct
+    assert "Python-side rule verification isn't available" in text
+    # Must never fall into HHB's degraded fallback wording for this case.
+    assert "no rule conditions were evaluable" not in text
+    assert "indicators computed but" not in text
+
+
+def test_icc_short_entry_uses_action_not_is_short_for_direction():
+    """ICC's short is a first-class strategy.entry(), not an HHB-style
+    forex-netting reinterpretation -- direction must come straight from
+    `action`, regardless of asset class or the (irrelevant, unused for
+    ICC) is_short flag."""
+    text = te.explain_entry("sell", "BTC/USD", "crypto", 61234.5, None, ICC_PARAMS, strategy_name="Kev's ICC")
+    assert text.startswith("Entered short:")
+
+
+def test_icc_entry_notes_daily_filter_state():
+    on_text = te.explain_entry("buy", "SMR", "stock", 34.5, None, ICC_PARAMS, strategy_name="Kev's ICC")
+    assert "daily trend filter on" in on_text
+
+    off_params = dict(ICC_PARAMS, useDailyFilter=False)
+    off_text = te.explain_entry("buy", "SMR", "stock", 34.5, None, off_params, strategy_name="Kev's ICC")
+    assert "daily trend filter off" in off_text
+
+
+def test_icc_entry_ignores_hhb_signal_and_pattern_data():
+    """Even if a (meaningless, HHB-shaped) signal/pattern happened to be
+    passed in, the ICC branch must never leak HHB's clause wording."""
+    text = te.explain_entry(
+        "buy", "SMR", "stock", 34.5, _full_signal(), ICC_PARAMS,
+        strategy_name="Kev's ICC", detected_patterns={"candlestick_patterns": {"doji": "neutral"}},
+    )
+    assert "broke above" not in text
+    assert "EMA" not in text
+    assert "doji" not in text
+
+
+def test_manual_icc_entry_notes_manual_origin():
+    text = te.explain_entry("buy", "SMR", "stock", 34.5, None, ICC_PARAMS, is_manual=True, strategy_name="Kev's ICC")
+    assert "(manual)" in text
+
+
+def test_hhb_entry_unaffected_when_strategy_name_is_none_or_hhb():
+    baseline = te.explain_entry("buy", "AAPL", "stock", 212.34, _full_signal(), DEFAULT_PARAMS)
+    with_none_name = te.explain_entry("buy", "AAPL", "stock", 212.34, _full_signal(), DEFAULT_PARAMS, strategy_name=None)
+    with_hhb_name = te.explain_entry(
+        "buy", "AAPL", "stock", 212.34, _full_signal(), DEFAULT_PARAMS, strategy_name="Higher High Breakout",
+    )
+    assert baseline == with_none_name == with_hhb_name

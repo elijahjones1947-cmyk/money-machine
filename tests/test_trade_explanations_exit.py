@@ -181,3 +181,71 @@ def test_explain_exit_webhook_incomplete_params_dict_cannot_classify():
     entry_trade = {"price": "100.00", "time": "2026-01-01T00:00:00"}
     text = te.explain_exit("sell", "AAPL", "stock", 101.0, "webhook", entry_trade=entry_trade, params={})
     assert "entry price or strategy params unavailable" in text
+
+
+# --- Kev's ICC exits (own branch -- classify_exit_reason never runs) -----
+
+ICC_PARAMS = {
+    "pivotLenL": 5, "pivotLenR": 5, "eqTolerancePct": 0.05, "useDailyFilter": True,
+    "dailyPivotLenL": 3, "dailyPivotLenR": 3, "dailySwingsForBias": 3, "slBufferPct": 0.05,
+    "h4PivotHistoryBars": 10, "blockOnIndecision": True,
+}
+
+
+def test_icc_webhook_exit_reports_price_level_framing_not_classification():
+    """ICC's params have no take_profit_pct/stop_loss_pct -- without the
+    strategy_name branch this would fall into the same generic 'entry
+    price or strategy params unavailable' fallback as the incomplete-
+    params-dict test above, which is misleading (entry price and params
+    ARE available, they just don't fit HHB's shape). Must get the
+    dedicated, honest ICC message instead."""
+    entry_trade = {"price": "100.00", "time": "2026-01-01T00:00:00"}
+    text = te.explain_exit(
+        "sell", "SMR", "stock", 101.0, "webhook", entry_trade=entry_trade,
+        params=ICC_PARAMS, strategy_name="Kev's ICC",
+    )
+    assert "TradingView's own stop/limit order" in text
+    assert "+1.00%" in text
+    assert "couldn't be classified" not in text
+    assert "entry price or strategy params unavailable" not in text
+
+
+def test_icc_webhook_exit_short_direction_pct_sign():
+    entry_trade = {"price": "100.00", "time": "2026-01-01T00:00:00"}
+    text = te.explain_exit(
+        "buy", "BTC/USD", "crypto", 98.5, "webhook", entry_trade=entry_trade,
+        params=ICC_PARAMS, strategy_name="Kev's ICC",
+    )
+    assert "+1.50%" in text  # short: profit direction is down, price fell 1.5%
+
+
+def test_icc_webhook_exit_without_entry_trade_omits_pct_but_still_explains():
+    text = te.explain_exit(
+        "sell", "SMR", "stock", 101.0, "webhook", entry_trade=None,
+        params=ICC_PARAMS, strategy_name="Kev's ICC",
+    )
+    assert "TradingView's own stop/limit order" in text
+    assert "at 101.00 -- " in text  # no "(+x.xx%)" clause inserted without a known entry price
+
+
+def test_icc_exit_still_definitive_for_non_webhook_sources():
+    """manual_close/safety_stop_loss/manual/strategy_switch already have
+    a definitive, non-inferred reason regardless of strategy family --
+    strategy_name must not change any of those, only the 'webhook'
+    classification path."""
+    text = te.explain_exit("sell", "SMR", "stock", 101.0, "manual_close", strategy_name="Kev's ICC")
+    assert text == "Exited via manual close: operator-initiated at 101.00."
+
+
+def test_hhb_exit_unaffected_when_strategy_name_is_none_or_hhb():
+    entry_trade = {"price": "100.00", "time": "2026-01-01T00:00:00"}
+    broker = _FakeBrokerWithBars([{"high": 100.5, "low": 99.8}])
+    baseline = te.explain_exit(
+        "sell", "AAPL", "stock", 101.0, "webhook", entry_trade=entry_trade, params=PARAMS, broker=broker,
+    )
+    with_hhb_name = te.explain_exit(
+        "sell", "AAPL", "stock", 101.0, "webhook", entry_trade=entry_trade, params=PARAMS, broker=broker,
+        strategy_name="Higher High Breakout",
+    )
+    assert baseline == with_hhb_name
+    assert "take-profit target" in baseline

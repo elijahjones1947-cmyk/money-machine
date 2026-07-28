@@ -75,4 +75,6 @@ export const api = {
   createNote: (content) =>
     request('/api/notes', { method: 'POST', body: JSON.stringify({ content }) }),
   deleteNote: (id) => request(`/api/notes/${id}`, { method: 'DELETE' }),
+
+  listErrors: (limit = 20) => request(`/api/errors?limit=${limit}`),
 };

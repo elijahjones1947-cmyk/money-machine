@@ -70,7 +70,7 @@ export function PositionsDetail() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>Symbol</th><th>Asset class</th><th>Qty</th><th>Avg entry</th><th>Current price</th><th>Unrealized P&amp;L</th><th>Trajectory</th><th>Why</th><th>Manual close</th>
+                <th>Symbol</th><th>Asset class</th><th>Qty</th><th>Avg entry</th><th>Current price</th><th>Unrealized P&amp;L</th><th>Open</th><th>Trajectory</th><th>Why</th><th>Manual close</th>
               </tr>
             </thead>
             <tbody>
@@ -86,6 +86,18 @@ export function PositionsDetail() {
                       <td>{p.current_price}</td>
                       <td style={{ color: p.unrealized_pl >= 0 ? 'var(--accent)' : 'var(--danger)', fontWeight: 600 }}>
                         {p.unrealized_pl >= 0 ? '+' : ''}{p.unrealized_pl}
+                      </td>
+                      <td>
+                        {p.hours_open != null ? `${p.hours_open}h` : '—'}
+                        {p.icc_stale && (
+                          <span
+                            className="pill"
+                            style={{ marginLeft: 6, color: 'var(--danger)', borderColor: 'var(--danger)' }}
+                            title="Open longer than expected for an ICC position -- ICC has no missed-take-profit backstop the way HHB does, worth a manual look"
+                          >
+                            ⚠ stale
+                          </span>
+                        )}
                       </td>
                       <td>
                         <TrajectoryBar avgEntry={p.avg_entry} currentPrice={p.current_price} unrealizedPl={p.unrealized_pl} qty={p.qty} />
@@ -120,7 +132,7 @@ export function PositionsDetail() {
                     </tr>
                     {expandedSymbol === p.symbol && entry?.explanation && (
                       <tr>
-                        <td colSpan={9} style={{ background: 'var(--bg)', fontSize: 13, color: 'var(--text-secondary)', padding: '10px 12px' }}>
+                        <td colSpan={10} style={{ background: 'var(--bg)', fontSize: 13, color: 'var(--text-secondary)', padding: '10px 12px' }}>
                           {entry.explanation}
                         </td>
                       </tr>

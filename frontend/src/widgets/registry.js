@@ -6,6 +6,10 @@ import { BacktestWidget } from './BacktestWidget.jsx';
 import { HermesControlWidget } from './HermesControlWidget.jsx';
 import { EquityWidget } from './EquityWidget.jsx';
 import { NotesWidget } from './NotesWidget.jsx';
+import { WatchlistCapacityWidget } from './WatchlistCapacityWidget.jsx';
+import { TradeRationaleWidget } from './TradeRationaleWidget.jsx';
+import { AlertHealthWidget } from './AlertHealthWidget.jsx';
+import { RecentErrorsWidget } from './RecentErrorsWidget.jsx';
 
 // Single source of truth for every widget the dashboard grid knows
 // about: id, display title, its summary component, and the detail page
@@ -19,6 +23,13 @@ export const WIDGET_REGISTRY = {
   hermes: { title: 'Hermes', Component: HermesControlWidget, to: null },
   equity: { title: 'Equity', Component: EquityWidget, to: '/equity' },
   notes: { title: 'Notes', Component: NotesWidget, to: '/notes' },
+  watchlistCapacity: { title: 'Bucket of Funds capacity', Component: WatchlistCapacityWidget, to: '/settings' },
+  tradeRationale: { title: 'Trade rationale', Component: TradeRationaleWidget, to: '/trades' },
+  alertHealth: { title: 'Alert health', Component: AlertHealthWidget, to: null },
+  recentErrors: { title: 'Recent errors', Component: RecentErrorsWidget, to: null },
 };
 
-export const DEFAULT_WIDGET_IDS = ['equity', 'positions', 'risk', 'tradelog', 'regime', 'backtest', 'hermes', 'notes'];
+export const DEFAULT_WIDGET_IDS = [
+  'equity', 'positions', 'risk', 'tradelog', 'regime', 'backtest', 'hermes', 'notes',
+  'watchlistCapacity', 'tradeRationale', 'alertHealth', 'recentErrors',
+];

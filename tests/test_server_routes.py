@@ -627,6 +627,130 @@ def test_dashboard_requires_auth(client):
     assert resp.status_code == 401
 
 
+# --- /api/dashboard's alert_health (item 3, dashboard suggestions) ---------
+
+def test_dashboard_alert_health_covers_every_watched_symbol_with_no_webhook_yet(auth_client):
+    import state
+
+    resp = auth_client.get("/api/dashboard")
+    health = resp.get_json()["alert_health"]
+    watched_total = sum(len(v) for v in state.watched_symbols.values())
+    assert len(health) == watched_total
+    aapl = next(h for h in health if h["symbol"] == "AAPL")
+    assert aapl["last_webhook_at"] is None
+    assert aapl["silent_for_seconds"] is None
+    assert aapl["stale"] is False  # never having received one isn't itself "stale"
+
+
+def test_dashboard_alert_health_reflects_a_recent_webhook(auth_client):
+    _post_webhook_and_wait(auth_client, {"secret": "test-webhook-secret", "action": "buy", "symbol": "BTC/USD"})
+
+    health = auth_client.get("/api/dashboard").get_json()["alert_health"]
+    btc = next(h for h in health if h["symbol"] == "BTC/USD")
+    assert btc["last_webhook_at"] is not None
+    assert btc["silent_for_seconds"] < 5
+    assert btc["stale"] is False
+
+
+def test_dashboard_alert_health_flags_a_symbol_stale_past_the_shared_threshold(auth_client, monkeypatch):
+    """Reuses alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS directly (not a
+    second hardcoded number) -- crypto is always "market hours" per
+    alerts._is_market_hours, so BTC/USD is a deterministic case
+    regardless of when this test runs."""
+    import alerts
+    import state
+
+    state.last_webhook_at["BTC/USD"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 60
+
+    health = auth_client.get("/api/dashboard").get_json()["alert_health"]
+    btc = next(h for h in health if h["symbol"] == "BTC/USD")
+    assert btc["stale"] is True
+
+
+def test_dashboard_alert_health_does_not_flag_stale_when_market_closed(auth_client, monkeypatch):
+    import alerts
+    import state
+
+    state.last_webhook_at["AAPL"] = time.time() - alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS - 60
+    monkeypatch.setattr(alerts, "_is_market_hours", lambda asset_class, now_utc=None: asset_class != "stock")
+
+    health = auth_client.get("/api/dashboard").get_json()["alert_health"]
+    aapl = next(h for h in health if h["symbol"] == "AAPL")
+    assert aapl["silent_for_seconds"] > alerts.WEBHOOK_SILENCE_THRESHOLD_SECONDS
+    assert aapl["stale"] is False  # market's closed -- silence is expected, not a problem
+
+
+# --- /api/dashboard's position hours_open / icc_stale (item 5) -------------
+
+def _assign_icc_strategy(symbol):
+    import db
+
+    icc_params = {
+        "pivotLenL": 5, "pivotLenR": 5, "eqTolerancePct": 0.05, "useDailyFilter": True,
+        "dailyPivotLenL": 3, "dailyPivotLenR": 3, "dailySwingsForBias": 3, "slBufferPct": 0.05,
+        "h4PivotHistoryBars": 10, "blockOnIndecision": True,
+    }
+    strategy = db.create_strategy("Kev's ICC", icc_params, timeframe="4H")
+    db.assign_strategy_to_symbol(symbol, strategy["id"])
+
+
+def _seed_open_position_with_entry(symbol, hours_ago, asset_class="crypto"):
+    import state
+    import datetime as dt
+
+    fake_position = SimpleNamespace(
+        symbol=symbol.replace("/", ""), asset_class="crypto", qty="1.0",
+        avg_entry_price="100.0", current_price="105.0", unrealized_pl="5.0",
+    )
+    entry_time = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours_ago)).isoformat()
+    state.trade_log.append({
+        "time": entry_time, "action": "buy", "symbol": symbol, "asset_class": asset_class,
+        "qty": 1.0, "price": "100.0", "pnl": None, "regime": None, "source": "webhook",
+        "explanation": None, "strategy_id": None,
+    })
+    return fake_position
+
+
+def test_dashboard_position_reports_hours_open_from_matching_entry_trade(auth_client, monkeypatch):
+    import server
+
+    fake_position = _seed_open_position_with_entry("BTC/USD", hours_ago=3)
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    positions = auth_client.get("/api/dashboard").get_json()["positions"]
+    btc = next(p for p in positions if p["symbol"] == "BTC/USD")
+    assert 2.9 <= btc["hours_open"] <= 3.1
+    assert btc["icc_stale"] is False  # not an ICC symbol -- HHB has its own intrabar backstop
+
+
+def test_dashboard_position_flags_icc_stale_past_the_age_threshold(auth_client, monkeypatch):
+    import server
+
+    _assign_icc_strategy("BTC/USD")
+    fake_position = _seed_open_position_with_entry(
+        "BTC/USD", hours_ago=server.ICC_POSITION_AGE_FLAG_HOURS + 1,
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    positions = auth_client.get("/api/dashboard").get_json()["positions"]
+    btc = next(p for p in positions if p["symbol"] == "BTC/USD")
+    assert btc["icc_stale"] is True
+
+
+def test_dashboard_position_does_not_flag_icc_stale_before_the_age_threshold(auth_client, monkeypatch):
+    import server
+
+    _assign_icc_strategy("BTC/USD")
+    fake_position = _seed_open_position_with_entry(
+        "BTC/USD", hours_ago=server.ICC_POSITION_AGE_FLAG_HOURS - 1,
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+
+    positions = auth_client.get("/api/dashboard").get_json()["positions"]
+    btc = next(p for p in positions if p["symbol"] == "BTC/USD")
+    assert btc["icc_stale"] is False
+
+
 def test_get_all_positions_classifies_alpaca_crypto_by_asset_class_field(app_module, reset_state, monkeypatch):
     """Alpaca's list_positions() returns crypto symbols WITHOUT the pair
     separator ('BTCUSD'), which the slash heuristic in

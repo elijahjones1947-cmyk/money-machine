@@ -14,7 +14,12 @@ export function PositionsWidget() {
       <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
         {positions.slice(0, 4).map((p, i) => (
           <div key={i} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
-            <span>{p.symbol}</span>
+            <span>
+              {p.symbol}
+              {p.icc_stale && (
+                <span style={{ color: 'var(--danger)' }} title={`Open ${p.hours_open}h -- longer than expected for an ICC position`}> ⚠</span>
+              )}
+            </span>
             <span className={p.unrealized_pl >= 0 ? 'metric-value positive' : 'metric-value negative'} style={{ fontSize: 13, fontWeight: 600 }}>
               {p.unrealized_pl >= 0 ? '+' : ''}{p.unrealized_pl}
             </span>
