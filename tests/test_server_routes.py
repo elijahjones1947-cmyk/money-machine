@@ -1445,11 +1445,11 @@ def test_webhook_allows_a_3rd_stock_symbol_while_crypto_stays_at_2(client, caplo
     uniform "N per class" rule, so it must accept RBLX with no watchlist
     rejection while crypto (still exactly 2 symbols) is unaffected either
     way. Forex separately grew to 5 (GBP_JPY/USD_JPY plus
-    GBP_AUD/NZD_JPY/CAD_JPY) -- covered by its own test below, not
-    asserted here."""
+    GBP_AUD/NZD_JPY/CAD_JPY), and stock later grew again to 5 (SMR/SPCX)
+    -- both covered by their own tests below, not asserted here."""
     import state
 
-    assert len(state.watched_symbols["stock"]) == 3
+    assert len(state.watched_symbols["stock"]) == 5
     assert len(state.watched_symbols["forex"]) == 5
     assert len(state.watched_symbols["crypto"]) == 2
 
@@ -1483,6 +1483,27 @@ def test_webhook_allows_the_3_new_forex_pairs(client, caplog):
         assert not any("not currently watched" in m for m in messages)
 
 
+def test_webhook_allows_the_2_new_stock_symbols(client, caplog):
+    """SMR/SPCX were added alongside AAPL/HOOD/RBLX (stock: 3 -> 5
+    watched symbols) -- each must be accepted by the watchlist gate with
+    no rejection, same as GBP_AUD/NZD_JPY/CAD_JPY were for forex. Unlike
+    the forex expansion, this one lands exactly at stock's existing
+    max_open_positions cap (5) rather than needing it raised -- see
+    test_stock_max_open_positions_covers_the_5_symbol_watchlist below."""
+    import state
+
+    assert state.watched_symbols["stock"] == ["AAPL", "HOOD", "RBLX", "SMR", "SPCX"]
+    for symbol in ("SMR", "SPCX"):
+        with caplog.at_level(logging.WARNING):
+            resp = _post_webhook_and_wait(client, {
+                "secret": "test-webhook-secret", "action": "buy", "symbol": symbol,
+            })
+        assert resp.status_code == 202
+        assert state.trade_log[-1]["symbol"] == symbol
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("not currently watched" in m for m in messages)
+
+
 def test_forex_max_open_positions_covers_the_5_pair_watchlist():
     """forex's max_open_positions was raised 3 -> 5 alongside the
     watchlist growing to 5 pairs, in both paper and live mode -- same
@@ -1493,6 +1514,18 @@ def test_forex_max_open_positions_covers_the_5_pair_watchlist():
 
     for mode in ("paper", "live"):
         assert config.RISK_CONFIG[mode]["forex"]["max_open_positions"] >= len(state.watched_symbols["forex"])
+
+
+def test_stock_max_open_positions_covers_the_5_symbol_watchlist():
+    """stock's max_open_positions was already 5 in both paper and live
+    mode BEFORE SMR/SPCX were added -- this confirms it still comfortably
+    covers the now-5-symbol watchlist without needing to move, unlike
+    forex's expansion above. Catches future drift if the watchlist grows
+    again without the cap following."""
+    import state
+
+    for mode in ("paper", "live"):
+        assert config.RISK_CONFIG[mode]["stock"]["max_open_positions"] >= len(state.watched_symbols["stock"])
 
 
 def test_manual_trade_bypasses_watchlist_gate(auth_client):

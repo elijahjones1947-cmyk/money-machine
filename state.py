@@ -30,14 +30,20 @@ peak_price_since_entry = {}
 # accepting it -- that's a separate server-side gate).
 #
 # Stock later grew to 3 (RBLX added alongside AAPL/HOOD, not a
-# replacement); forex later grew to 5 (GBP_AUD/NZD_JPY/CAD_JPY added
-# alongside GBP_JPY/USD_JPY, a deliberate frequency increase -- see
-# config.RISK_CONFIG's forex max_open_positions, raised in lockstep so
-# the risk cap doesn't become the binding constraint before the
-# watchlist itself does). Crypto stayed at 2. Nothing asset-class-
-# uniform about the "2" above; it's just what each list happens to hold.
+# replacement), then 5 (SMR/SPCX added, same reasoning); forex later
+# grew to 5 (GBP_AUD/NZD_JPY/CAD_JPY added alongside GBP_JPY/USD_JPY, a
+# deliberate frequency increase -- see config.RISK_CONFIG's forex
+# max_open_positions, raised in lockstep so the risk cap doesn't become
+# the binding constraint before the watchlist itself does). Crypto
+# stayed at 2. Nothing asset-class-uniform about the "2" above; it's
+# just what each list happens to hold.
+#
+# Stock's max_open_positions (config.RISK_CONFIG) was already 5 in both
+# paper and live mode BEFORE SMR/SPCX -- comfortably covering 3
+# concurrent positions with room to spare, so unlike forex's expansion
+# this one lands exactly at the existing cap and doesn't need it raised.
 watched_symbols = {
-    "stock": ["AAPL", "HOOD", "RBLX"],
+    "stock": ["AAPL", "HOOD", "RBLX", "SMR", "SPCX"],
     "forex": ["GBP_JPY", "USD_JPY", "GBP_AUD", "NZD_JPY", "CAD_JPY"],
     "crypto": ["BTC/USD", "ETH/USD"],
 }
