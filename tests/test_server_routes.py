@@ -868,6 +868,63 @@ def test_get_all_positions_classifies_alpaca_crypto_by_asset_class_field(app_mod
     assert "BTCUSD" not in positions  # raw no-separator form never leaks downstream
 
 
+def test_get_all_positions_logs_a_warning_when_alpaca_is_unreachable(app_module, reset_state, monkeypatch, caplog):
+    """The real incident this closes: get_all_positions()'s Alpaca branch
+    used to call alerts.record_broker_error() with no accompanying
+    logging.* call -- the ONE such site of the 7 in this file -- so a
+    real OANDA/Alpaca outage that tripped the "N broker errors" Discord
+    alert left ZERO trace in error_log or Railway's console logs. Must
+    still degrade gracefully (return whatever OANDA positions ARE
+    available, never raise) -- only the visibility changes."""
+    import server
+    import state
+
+    def boom():
+        raise BrokerConnectionError("Alpaca error (500): internal server error")
+
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", boom)
+    monkeypatch.setattr(server.oanda_broker, "get_positions", lambda: [])
+
+    before = len(state.broker_error_timestamps)
+    with caplog.at_level(logging.WARNING):
+        positions = server.get_all_positions()
+
+    assert positions == []  # degrades gracefully, never raises
+    assert len(state.broker_error_timestamps) == before + 1  # alerts.record_broker_error still fires
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("Could not fetch Alpaca positions" in m and "500" in m for m in messages)
+
+
+def test_get_all_positions_logs_a_warning_when_oanda_is_unreachable(app_module, reset_state, monkeypatch, caplog):
+    """Mirror of the Alpaca test above for OANDA's branch -- the actual
+    incident (2026-07-29, 4 errors / 45 min) was OANDA-side, a real 401
+    ("Insufficient authorization to perform request")."""
+    import server
+    import state
+
+    real_alpaca_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="10",
+        avg_entry_price="200.0", current_price="205.0", unrealized_pl="50.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [real_alpaca_position])
+
+    def boom():
+        raise BrokerConnectionError("OANDA error (401): Insufficient authorization to perform request.")
+
+    monkeypatch.setattr(server.oanda_broker, "get_positions", boom)
+
+    before = len(state.broker_error_timestamps)
+    with caplog.at_level(logging.WARNING):
+        positions = server.get_all_positions()
+
+    # Degrades to Alpaca-only, not an empty list -- one broker failing
+    # must never hide the other broker's real positions.
+    assert [p["symbol"] for p in positions] == ["AAPL"]
+    assert len(state.broker_error_timestamps) == before + 1
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("Could not fetch OANDA positions" in m and "401" in m for m in messages)
+
+
 def test_normalize_alpaca_crypto_symbol(app_module):
     import server
 

@@ -845,7 +845,21 @@ def get_all_positions():
                 'current_price': float(p.current_price),
                 'unrealized_pl': float(p.unrealized_pl),
             })
-    except BrokerConnectionError:
+    except BrokerConnectionError as e:
+        # Confirmed live: this was the ONE record_broker_error() call site
+        # (of 7 in this file) with no accompanying logging.* call, which
+        # meant an actual incident (a real OANDA 401 that tripped the
+        # "4 broker errors in 45 minutes" Discord alert) left zero trace
+        # in error_log or Railway's console logs -- the only reason the
+        # real error text was recoverable at all was that this alert
+        # happened to cross the threshold and fire a GitHub dispatch that
+        # incidentally captured the in-memory traceback. Every other
+        # get_all_positions() caller (run_intrabar_exit_checks every 20s,
+        # run_position_safety_checks every 5 min, /api/dashboard) already
+        # tolerates a partial/degraded positions list just fine -- this
+        # is purely about making the error visible on its own, not
+        # changing behavior.
+        logging.warning("Could not fetch Alpaca positions: {}".format(e))
         alerts.record_broker_error(detail=traceback.format_exc())
 
     try:
@@ -869,7 +883,10 @@ def get_all_positions():
                 'current_price': None,
                 'unrealized_pl': unrealized,
             })
-    except BrokerConnectionError:
+    except BrokerConnectionError as e:
+        # Same gap, same fix, as the Alpaca branch above -- see that
+        # comment for the incident this closes.
+        logging.warning("Could not fetch OANDA positions: {}".format(e))
         alerts.record_broker_error(detail=traceback.format_exc())
 
     return positions
