@@ -14,6 +14,10 @@ import { RecentErrorsWidget } from './RecentErrorsWidget.jsx';
 // Single source of truth for every widget the dashboard grid knows
 // about: id, display title, its summary component, and the detail page
 // route it taps through to (null = no detail page, e.g. Hermes control).
+// `description` is optional -- shown as an (i) tooltip next to the title
+// (Widget.jsx) -- most widgets are self-explanatory enough not to need
+// one; only add it where the widget's meaning genuinely isn't obvious
+// from its title + content alone.
 export const WIDGET_REGISTRY = {
   positions: { title: 'Positions', Component: PositionsWidget, to: '/positions' },
   risk: { title: 'Halt status', Component: RiskWidget, to: '/risk' },
@@ -25,7 +29,10 @@ export const WIDGET_REGISTRY = {
   notes: { title: 'Notes', Component: NotesWidget, to: '/notes' },
   watchlistCapacity: { title: 'Bucket of Funds capacity', Component: WatchlistCapacityWidget, to: '/settings' },
   tradeRationale: { title: 'Trade rationale', Component: TradeRationaleWidget, to: '/trades' },
-  alertHealth: { title: 'Alert health', Component: AlertHealthWidget, to: null },
+  alertHealth: {
+    title: 'Alert health', Component: AlertHealthWidget, to: null,
+    description: "Time since the last webhook signal received per watched symbol, so a TradingView alert that's gone silent is easy to spot.",
+  },
   recentErrors: { title: 'Recent errors', Component: RecentErrorsWidget, to: null },
 };
 

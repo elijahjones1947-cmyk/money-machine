@@ -49,6 +49,17 @@
   color: var(--text-secondary);
 }
 
+.widget-info {
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: help;
+  transition: color 0.15s;
+}
+
+.widget-info:hover {
+  color: var(--accent);
+}
+
 .widget-body {
   flex: 1;
   padding: 14px;
