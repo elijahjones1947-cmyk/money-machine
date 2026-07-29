@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify, session, send_from_directory
-import logging, time, datetime, math, copy, hmac, traceback
+import logging, time, datetime, math, copy, hmac, traceback, calendar
 import concurrent.futures
 
 import config
@@ -1103,11 +1103,40 @@ def api_dashboard():
         t['pnl'] for t in completed
         if datetime.datetime.fromisoformat(t['time']) >= month_start
     )
+
+    # Pace tracking -- today counts as BOTH an elapsed day (its pnl-so-far
+    # already counts toward current_daily_pace) and a remaining day (it's
+    # not over yet, so it's still available toward required_daily_pace).
+    # That intentional overlap is what keeps both divisors always >= 1
+    # (1st of the month -> days_elapsed=1, not 0; last day of the month ->
+    # days_remaining=1, not 0) with no None/div-by-zero special-casing.
+    total_days_in_month = calendar.monthrange(now_utc.year, now_utc.month)[1]
+    days_elapsed_in_month = now_utc.day
+    days_remaining_in_month = total_days_in_month - now_utc.day + 1
+    goal = state.monthly_profit_goal
+    current_daily_pace = round(month_pnl / days_elapsed_in_month, 2)
+    goal_hit = bool(goal and month_pnl >= goal)
+    required_daily_pace = round(max(0, goal - month_pnl) / days_remaining_in_month, 2) if goal else None
+
+    if not goal:
+        pace_status = None
+    elif goal_hit:
+        pace_status = 'goal_hit'
+    elif current_daily_pace >= required_daily_pace:
+        pace_status = 'on_track'
+    else:
+        pace_status = 'behind_pace'
+
     monthly_profit = {
         'realized_pnl': round(month_pnl, 2),
-        'goal': state.monthly_profit_goal,
-        'pct_of_goal': round(month_pnl / state.monthly_profit_goal * 100, 1) if state.monthly_profit_goal else None,
+        'goal': goal,
+        'pct_of_goal': round(month_pnl / goal * 100, 1) if goal else None,
         'month': month_start.strftime('%Y-%m'),
+        'days_elapsed_in_month': days_elapsed_in_month,
+        'days_remaining_in_month': days_remaining_in_month,
+        'current_daily_pace': current_daily_pace,
+        'required_daily_pace': required_daily_pace,
+        'pace_status': pace_status,
     }
 
     regimes = []

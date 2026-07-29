@@ -690,6 +690,72 @@ def test_monthly_profit_pct_of_goal_computed_against_the_live_goal(auth_client):
     assert mp["pct_of_goal"] == 50.0
 
 
+# --- monthly_profit's pace-awareness fields (days left, required $/day,
+# on-track vs behind) -- deliberately NOT freezing "now" (matching this
+# file's existing test-run-date-independence convention above), so every
+# assertion here is either an invariant that holds on any day of any
+# month, or picks pnl values extreme enough to be unambiguous regardless
+# of how many days are actually left when the suite runs. ---------------
+
+def test_monthly_profit_days_elapsed_and_remaining_always_span_the_full_month(auth_client):
+    import calendar
+    import datetime as dt
+
+    now = dt.datetime.now(dt.timezone.utc)
+    total_days = calendar.monthrange(now.year, now.month)[1]
+
+    mp = auth_client.get("/api/dashboard").get_json()["monthly_profit"]
+    # Today deliberately double-counts (elapsed AND remaining, see
+    # server.py's comment) -- the two always sum to total_days + 1, and
+    # neither is ever 0 (both divisors used elsewhere must never be 0).
+    assert mp["days_elapsed_in_month"] + mp["days_remaining_in_month"] == total_days + 1
+    assert mp["days_elapsed_in_month"] >= 1
+    assert mp["days_remaining_in_month"] >= 1
+
+
+def test_monthly_profit_behind_pace_with_zero_realized_pnl(auth_client):
+    """$0 realized so far can never meet a positive required pace, no
+    matter what day of the month it is."""
+    mp = auth_client.get("/api/dashboard").get_json()["monthly_profit"]
+    assert mp["current_daily_pace"] == 0.0
+    assert mp["required_daily_pace"] > 0
+    assert mp["pace_status"] == "behind_pace"
+
+
+def test_monthly_profit_on_track_when_current_pace_comfortably_clears_required(auth_client):
+    """pnl one cent under goal: required_daily_pace is at most
+    0.01/1 = 0.01/day (whatever's left, spread over at least 1 day),
+    while current_daily_pace is at least 899.99/31 ~= 29/day (whatever's
+    elapsed, over at most 31 days) -- current always beats required
+    regardless of which day of the month the suite runs on."""
+    import state
+    import datetime as dt
+
+    state.trade_log.append({
+        "time": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "action": "sell", "symbol": "AAPL", "asset_class": "stock", "qty": 1, "price": "100.00",
+        "pnl": 899.99, "regime": None, "source": "webhook", "explanation": None, "strategy_id": None,
+    })
+
+    mp = auth_client.get("/api/dashboard").get_json()["monthly_profit"]
+    assert mp["pace_status"] == "on_track"
+
+
+def test_monthly_profit_goal_hit_takes_priority_over_pace_comparison(auth_client):
+    import state
+    import datetime as dt
+
+    state.trade_log.append({
+        "time": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "action": "sell", "symbol": "AAPL", "asset_class": "stock", "qty": 1, "price": "100.00",
+        "pnl": 950.0, "regime": None, "source": "webhook", "explanation": None, "strategy_id": None,
+    })
+
+    mp = auth_client.get("/api/dashboard").get_json()["monthly_profit"]
+    assert mp["pace_status"] == "goal_hit"
+    assert mp["required_daily_pace"] == 0.0
+
+
 # --- /api/settings/monthly_profit_goal ------------------------------------
 
 def test_monthly_profit_goal_requires_auth(client):

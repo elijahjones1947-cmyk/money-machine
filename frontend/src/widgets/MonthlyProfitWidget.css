@@ -1,0 +1,46 @@
+.pace-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  width: fit-content;
+}
+
+.pace-pill.goal_hit {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+}
+
+.pace-pill.on_track {
+  color: var(--accent);
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+}
+
+.pace-pill.behind_pace {
+  color: var(--danger);
+  background: var(--danger-dim);
+  border: 1px solid var(--danger);
+}
+
+/* Only kicks in once the pace is behind AND the month is nearly out --
+   a steady pulse is the "this needs attention now" signal Eli asked
+   for, not just a static red pill that blends into the rest of the UI. */
+.pace-pill.behind_pace.urgent {
+  animation: pace-urgent-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pace-urgent-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--danger-dim); }
+  50% { box-shadow: 0 0 0 6px transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pace-pill.behind_pace.urgent {
+    animation: none;
+  }
+}
