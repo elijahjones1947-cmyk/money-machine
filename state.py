@@ -51,7 +51,14 @@ watched_symbols = {
 bot_enabled = True  # manual global kill switch (overrides all asset classes)
 
 max_trades_per_day = {"stock": 20, "forex": 20, "crypto": 10}
-risk_percent = {"stock": 10, "forex": 5, "crypto": 3}
+# forex raised 5 -> 10 (matching stock) alongside HHB-Forex v4's wider
+# take_profit_pct (0.14% -> 0.5%) -- Eli's approved "blended" fix for
+# forex's win size being ~9-18x too small ($5.60/win at the old 4%
+# Settings-override value vs a $50-100 target): widening TP alone would
+# have cratered the win rate (TP/SL ratio 2.0 -> 17.9+), so size and TP
+# both move, more modestly, together. See the HHB-Forex v4 strategy row
+# this was created alongside.
+risk_percent = {"stock": 10, "forex": 10, "crypto": 3}
 trades_today = {"stock": 0, "forex": 0, "crypto": 0}
 
 # Populated at startup from config.get_risk_config() (a deep copy, not

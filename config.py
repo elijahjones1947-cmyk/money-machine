@@ -131,7 +131,21 @@ BROKER_CONFIG = {
 RISK_CONFIG = {
     "paper": {
         "stock": {"max_position_size_pct": 0.10, "max_daily_loss_pct": 0.05, "max_open_positions": 5, "safety_stop_loss_pct": 0.02},
-        "forex": {"max_position_size_pct": 0.05, "max_daily_loss_pct": 0.03, "max_open_positions": 5, "max_leverage": 20, "safety_stop_loss_pct": 0.015},
+        # forex's max_position_size_pct raised 0.05 -> 0.10 (matching
+        # stock) in lockstep with state.py's risk_percent forex bump
+        # 5 -> 10 -- see that comment for the full "bigger wins" story.
+        # Raising the cap alone (with risk_percent unchanged) would have
+        # been a no-op; raising risk_percent alone (with the cap
+        # unchanged) would have silently clamped every forex trade back
+        # down to the old 5% via _process_trade_signal's own
+        # defensive-clamp logic (see server.py) -- same "two numbers
+        # must move together or the smaller one silently wins" lesson
+        # the state.risk_caps one-dict design already exists to prevent.
+        # Deliberately NOT applied to "live" mode below -- Eli approved
+        # this for paper (what's actually running), and live-mode's caps
+        # are a separate, real-money risk-tolerance decision nobody's
+        # asked to revisit yet.
+        "forex": {"max_position_size_pct": 0.10, "max_daily_loss_pct": 0.03, "max_open_positions": 5, "max_leverage": 20, "safety_stop_loss_pct": 0.015},
         "crypto": {"max_position_size_pct": 0.03, "max_daily_loss_pct": 0.02, "max_open_positions": 3, "safety_stop_loss_pct": 0.05},
         "account_wide": {"max_daily_loss_pct": 0.08},
     },
