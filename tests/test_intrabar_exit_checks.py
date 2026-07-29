@@ -325,6 +325,64 @@ def test_intrabar_poll_skips_a_dust_position_at_a_much_higher_price_scale(client
     assert not any("INTRABAR" in m for m in messages)
 
 
+def test_intrabar_poll_is_a_no_op_for_a_disabled_asset_class(client, monkeypatch):
+    """The Settings on/off switch (state.intrabar_poll_enabled) -- a
+    position that would otherwise trigger an intrabar force-close must be
+    left completely alone when its asset class is switched off: no trade,
+    and it never even starts the live peak-price tracker for it."""
+    import server
+    import state
+
+    state.intrabar_poll_enabled["stock"] = False
+    _assign_strategy("HHB - Stock", take_profit_pct=1.0, stop_loss_pct=0.5, symbol="AAPL")
+
+    fake_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="10",
+        avg_entry_price="100.0", current_price="101.5", unrealized_pl="15.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_position])
+    monkeypatch.setattr(server.alpaca_broker, "get_price", lambda symbol: 101.5)  # +1.5%, TP is +1% -- would fire if enabled
+
+    server.run_intrabar_exit_checks()
+
+    assert state.trade_log == []
+    assert "AAPL" not in state.peak_price_since_entry
+
+
+def test_intrabar_poll_disabling_one_asset_class_does_not_affect_another(client, monkeypatch):
+    """Per-asset-class, not a global kill switch: disabling forex must
+    leave a stock position's own intrabar force-close working exactly as
+    before, in the SAME poll cycle."""
+    import server
+    import state
+
+    state.intrabar_poll_enabled["forex"] = False
+    _assign_strategy("HHB - Stock", take_profit_pct=1.0, stop_loss_pct=0.5, symbol="AAPL")
+    _assign_strategy("HHB - Forex", take_profit_pct=1.0, stop_loss_pct=0.5, symbol="GBP_JPY")
+
+    fake_stock_position = SimpleNamespace(
+        symbol="AAPL", asset_class="us_equity", qty="10",
+        avg_entry_price="100.0", current_price="101.5", unrealized_pl="15.0",
+    )
+    fake_forex_position = {
+        "instrument": "GBP_JPY",
+        "long": {"units": "1000", "averagePrice": "190.0", "unrealizedPL": "0"},
+        "short": {"units": "0", "unrealizedPL": "0"},
+    }
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [fake_stock_position])
+    monkeypatch.setattr(server.alpaca_broker, "get_price", lambda symbol: 101.5)  # AAPL: +1.5%, past 1% TP
+    monkeypatch.setattr(server.oanda_broker, "get_positions", lambda: [fake_forex_position])
+    monkeypatch.setattr(server.oanda_broker, "get_price", lambda symbol: 192.0)  # GBP_JPY: +1.05%, past 1% TP -- would fire if enabled
+
+    server.run_intrabar_exit_checks()
+    webhook_queue.wait_for_idle("AAPL")
+
+    assert "GBP_JPY" not in state.peak_price_since_entry  # forex: skipped entirely, disabled
+    trade_symbols = [t["symbol"] for t in state.trade_log]
+    assert "AAPL" in trade_symbols  # stock: closed normally, unaffected by forex's switch
+    assert "GBP_JPY" not in trade_symbols
+
+
 def test_intrabar_poll_skips_a_symbol_with_no_assigned_strategy(client, monkeypatch):
     """No take_profit_pct/stop_loss_pct to check against -- must be
     silently skipped, not raise."""

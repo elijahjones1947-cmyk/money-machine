@@ -37,6 +37,7 @@ function RiskCard({ assetClass, data, onSaved }) {
   const [maxOpenPositions, setMaxOpenPositions] = useState(caps.max_open_positions ?? '');
   const [safetyStopPct, setSafetyStopPct] = useState(toPct(caps.safety_stop_loss_pct));
   const [maxLeverage, setMaxLeverage] = useState(caps.max_leverage ?? '');
+  const [intrabarEnabled, setIntrabarEnabled] = useState(data.intrabar_poll_enabled?.[assetClass] ?? true);
   const [status, setStatus] = useState(null);
 
   useEffect(() => {
@@ -48,6 +49,7 @@ function RiskCard({ assetClass, data, onSaved }) {
     setMaxOpenPositions(c.max_open_positions ?? '');
     setSafetyStopPct(toPct(c.safety_stop_loss_pct));
     setMaxLeverage(c.max_leverage ?? '');
+    setIntrabarEnabled(data.intrabar_poll_enabled?.[assetClass] ?? true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, assetClass]);
 
@@ -64,6 +66,7 @@ function RiskCard({ assetClass, data, onSaved }) {
         max_daily_loss_pct: Number(maxDailyLossPct),
         max_open_positions: Number(maxOpenPositions),
         safety_stop_loss_pct: Number(safetyStopPct),
+        intrabar_poll_enabled: intrabarEnabled,
       };
       if (assetClass === 'forex') payload.max_leverage = Number(maxLeverage);
       await api.updateSettings(payload);
@@ -98,6 +101,28 @@ function RiskCard({ assetClass, data, onSaved }) {
         <Field label="Safety stop-loss %" value={safetyStopPct} onChange={setSafetyStopPct} />
         {assetClass === 'forex' && <Field label="Max leverage" value={maxLeverage} onChange={setMaxLeverage} />}
       </div>
+
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+        marginTop: 14, paddingTop: 14, borderTop: '1px solid var(--border)',
+      }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>Intrabar exit poller</div>
+          <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }}>
+            Independent backstop that catches a take-profit/stop-loss/trailing-stop touch between TradingView's
+            bar-close alerts. Doesn't affect the safety-net loss check when off.
+          </div>
+        </div>
+        <button
+          type="button"
+          className={intrabarEnabled ? 'button button-accent' : 'button button-danger'}
+          style={{ flexShrink: 0 }}
+          onClick={() => setIntrabarEnabled((v) => !v)}
+        >
+          {intrabarEnabled ? 'On' : 'Off'}
+        </button>
+      </div>
+
       {status && status !== 'saving' && status !== 'saved' && <div className="error-text" style={{ marginTop: 8 }}>{status}</div>}
     </div>
   );

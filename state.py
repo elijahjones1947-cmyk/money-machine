@@ -61,6 +61,16 @@ max_trades_per_day = {"stock": 20, "forex": 20, "crypto": 10}
 risk_percent = {"stock": 10, "forex": 10, "crypto": 3}
 trades_today = {"stock": 0, "forex": 0, "crypto": 0}
 
+# Per-asset-class on/off switch for server.py's run_intrabar_exit_checks()
+# poller -- Eli-facing toggle in Settings, same asset_class-scoped
+# /api/settings route and save_setting/load_persisted_state round trip as
+# risk_percent/max_trades_per_day above. Deliberately scoped no wider and
+# no narrower than that: when a class is off, run_intrabar_exit_checks()
+# just skips positions in that class for the cycle (a no-op for them),
+# leaving run_position_safety_checks() (the loss-only safety net) and
+# everything else untouched.
+intrabar_poll_enabled = {"stock": True, "forex": True, "crypto": True}
+
 # The dashboard's "rent generator" monthly profit tracker -- Eli's target
 # for realized P&L (closed trades only, not unrealized/open-position
 # P&L) to cover in a calendar month. Editable via Settings

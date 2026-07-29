@@ -121,6 +121,10 @@ def load_persisted_state():
         if saved_max:
             state.max_trades_per_day.update(saved_max)
 
+        saved_intrabar_enabled = db.get_setting("intrabar_poll_enabled")
+        if saved_intrabar_enabled:
+            state.intrabar_poll_enabled.update(saved_intrabar_enabled)
+
         saved_profit_goal = db.get_setting("monthly_profit_goal")
         if saved_profit_goal is not None:
             state.monthly_profit_goal = saved_profit_goal
@@ -367,6 +371,13 @@ def run_intrabar_exit_checks():
         asset_class = p["asset_class"]
         broker = BROKERS.get(asset_class)
         if broker is None:
+            continue
+
+        # Eli-facing on/off switch (Settings) -- state.intrabar_poll_enabled.
+        # A no-op for this position when its asset class is switched off:
+        # skips straight past this job's own force-close logic below,
+        # doesn't touch run_position_safety_checks() or anything else.
+        if not state.intrabar_poll_enabled.get(asset_class, True):
             continue
 
         # Dust positions (config.DUST_POSITION_VALUE_USD -- same
@@ -1202,6 +1213,7 @@ def api_dashboard():
         'bot_enabled': state.bot_enabled,
         'risk_percent': state.risk_percent,
         'max_trades_per_day': state.max_trades_per_day,
+        'intrabar_poll_enabled': state.intrabar_poll_enabled,
         'trades_today': state.trades_today,
         'trade_stats': {
             'win_rate': win_rate, 'avg_gain': avg_gain, 'avg_loss': avg_loss,
@@ -1318,6 +1330,12 @@ def settings():
             db.save_setting('max_trades_per_day', state.max_trades_per_day)
         except Exception as e:
             logging.warning('Could not persist max_trades_per_day to DB: {}'.format(e))
+    if 'intrabar_poll_enabled' in data:
+        state.intrabar_poll_enabled[asset_class] = bool(data['intrabar_poll_enabled'])
+        try:
+            db.save_setting('intrabar_poll_enabled', state.intrabar_poll_enabled)
+        except Exception as e:
+            logging.warning('Could not persist intrabar_poll_enabled to DB: {}'.format(e))
 
     risk_caps_changed = False
     for field, coerce in _RISK_CAP_FIELDS.items():

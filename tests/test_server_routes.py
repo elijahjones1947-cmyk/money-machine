@@ -612,6 +612,36 @@ def test_settings_requires_auth(client):
     assert resp.status_code == 401
 
 
+# --- Intrabar exit poller on/off switch (Settings) ------------------------
+
+def test_settings_updates_intrabar_poll_enabled_and_persists(auth_client, db_store):
+    """Same shape/persistence round trip as risk_percent/max_trades_per_day
+    above -- per-asset-class, in-memory state updated immediately and
+    written through to the DB under the SAME state.intrabar_poll_enabled
+    dict shape server.py's load_persisted_state() reads back on restart."""
+    import state
+
+    resp = auth_client.post("/api/settings", json={
+        "asset_class": "forex", "intrabar_poll_enabled": False,
+    })
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "updated"}
+
+    assert state.intrabar_poll_enabled["forex"] is False
+    # Untouched asset classes stay at their default -- this is a per-class
+    # switch, not a global one.
+    assert state.intrabar_poll_enabled["stock"] is True
+    assert state.intrabar_poll_enabled["crypto"] is True
+
+    saved = json.loads(db_store["settings"]["intrabar_poll_enabled"])
+    assert saved == {"stock": True, "forex": False, "crypto": True}
+
+
+def test_dashboard_exposes_intrabar_poll_enabled_defaulting_to_on(auth_client):
+    body = auth_client.get("/api/dashboard").get_json()
+    assert body["intrabar_poll_enabled"] == {"stock": True, "forex": True, "crypto": True}
+
+
 def test_dashboard_returns_combined_equity_and_positions(auth_client):
     resp = auth_client.get("/api/dashboard")
     assert resp.status_code == 200
