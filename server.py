@@ -1004,6 +1004,23 @@ def api_dashboard():
     raw_positions = get_all_positions()
     positions = []
     for p in raw_positions:
+        # Dust positions (config.DUST_POSITION_VALUE_USD -- same constant
+        # and same qty*avg_entry math as run_position_safety_checks()/
+        # run_intrabar_exit_checks()'s own dust guards) are excluded from
+        # the DASHBOARD'S display/count only -- this is a display filter
+        # on api_dashboard()'s own local `positions` list, not a change
+        # to get_all_positions() itself, so run_position_safety_checks(),
+        # run_intrabar_exit_checks(), the overlapping-buy guard, and
+        # max_open_positions all still see (and correctly still protect/
+        # count against their own caps) every real broker position
+        # exactly as before. A rounding leftover worth a fraction of a
+        # cent isn't real capital at risk and shouldn't clutter the
+        # Positions widget/page or skew the "open positions" count, but
+        # it's still genuinely open at the broker -- nothing here closes
+        # it, hides it from Alpaca, or touches the safety-net logic.
+        if p['qty'] * p['avg_entry'] < config.DUST_POSITION_VALUE_USD:
+            continue
+
         price_fmt = '{:.5f}' if p['asset_class'] == 'forex' else '{:.4f}' if p['asset_class'] == 'crypto' else '{:.2f}'
         signed_qty = p['qty'] if p['direction'] == 'long' else -p['qty']
 

@@ -622,6 +622,93 @@ def test_dashboard_returns_combined_equity_and_positions(auth_client):
     assert "risk_caps" in body
 
 
+# --- /api/dashboard excludes dust positions from display/count (per Eli:
+# they were cluttering the Positions widget/page and skewing counts) ---
+
+def test_dashboard_excludes_a_dust_position_entirely(auth_client, monkeypatch):
+    """The exact SOL/USD shape from the real incident (qty 5.45e-07 @
+    avg_entry 78.32 -> cost basis ~$0.00004, well under config.
+    DUST_POSITION_VALUE_USD's $5.00) must not appear in /api/dashboard's
+    positions list at all -- not shown, not counted."""
+    import server
+
+    dust_position = SimpleNamespace(
+        symbol="SOLUSD", asset_class="crypto", qty="5.45e-07",
+        avg_entry_price="78.32", current_price="73.62", unrealized_pl="-0.000003",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [dust_position])
+
+    positions = auth_client.get("/api/dashboard").get_json()["positions"]
+    assert positions == []
+
+
+def test_dashboard_still_shows_a_real_position_alongside_an_excluded_dust_one(auth_client, monkeypatch):
+    """The filter must be selective, not blanket -- a real position in
+    the same response as a dust one must still show up, so the "open
+    positions" count reflects only genuine exposure."""
+    import server
+
+    real_position = SimpleNamespace(
+        symbol="BTCUSD", asset_class="crypto", qty="0.05",
+        avg_entry_price="65226.83", current_price="65402.30", unrealized_pl="10.0",
+    )
+    dust_position = SimpleNamespace(
+        symbol="SOLUSD", asset_class="crypto", qty="5.45e-07",
+        avg_entry_price="78.32", current_price="73.62", unrealized_pl="-0.000003",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [real_position, dust_position])
+
+    positions = auth_client.get("/api/dashboard").get_json()["positions"]
+    assert [p["symbol"] for p in positions] == ["BTC/USD"]
+
+
+def test_dashboard_dust_boundary_is_not_strictly_less_than(auth_client, monkeypatch):
+    """A position whose cost basis is exactly at config.DUST_POSITION_VALUE_USD
+    ($5.00) counts as real, matching the same '< threshold is dust'
+    convention already used by run_position_safety_checks(),
+    run_intrabar_exit_checks(), and risk_manager.py's own dust filter --
+    one shared boundary rule, not a second one invented here."""
+    import server
+
+    boundary_position = SimpleNamespace(
+        symbol="BTCUSD", asset_class="crypto", qty="1", avg_entry_price="5.0",
+        current_price="5.0", unrealized_pl="0.0",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [boundary_position])
+
+    positions = auth_client.get("/api/dashboard").get_json()["positions"]
+    assert [p["symbol"] for p in positions] == ["BTC/USD"]
+
+
+def test_dust_exclusion_is_display_only_safety_net_still_sees_and_protects_it(auth_client, monkeypatch):
+    """The critical guarantee: filtering /api/dashboard's display must
+    NOT touch get_all_positions() itself -- run_position_safety_checks()
+    (a completely separate code path that calls get_all_positions()
+    directly, not through this route) must still see the exact same
+    dust position and still correctly skip force-closing it, proving
+    the underlying data/safety-net logic is untouched."""
+    import server
+    import state
+
+    dust_position = SimpleNamespace(
+        symbol="SOLUSD", asset_class="crypto", qty="5.45e-07",
+        avg_entry_price="78.32", current_price="73.62", unrealized_pl="-0.0001",
+    )
+    monkeypatch.setattr(server.alpaca_broker, "get_positions", lambda: [dust_position])
+
+    # Confirmed absent from the dashboard's display...
+    assert auth_client.get("/api/dashboard").get_json()["positions"] == []
+
+    # ...while the safety net (a separate caller of get_all_positions())
+    # still sees it and correctly declines to touch it.
+    def fail_if_called(symbol, side, size, order_type="market"):
+        raise AssertionError("place_order should never be called for a dust position")
+
+    monkeypatch.setattr(server.alpaca_broker, "place_order", fail_if_called)
+    server.run_position_safety_checks()
+    assert state.trade_log == []
+
+
 def test_dashboard_requires_auth(client):
     resp = client.get("/api/dashboard")
     assert resp.status_code == 401
