@@ -622,6 +622,100 @@ def test_dashboard_returns_combined_equity_and_positions(auth_client):
     assert "risk_caps" in body
 
 
+# --- /api/dashboard's monthly_profit (the "rent generator" tracker) -------
+
+def test_monthly_profit_defaults_to_zero_pnl_and_the_900_goal(auth_client):
+    body = auth_client.get("/api/dashboard").get_json()
+    mp = body["monthly_profit"]
+    assert mp["realized_pnl"] == 0
+    assert mp["goal"] == 900.0
+    assert mp["pct_of_goal"] == 0.0
+    assert mp["month"]  # a real "YYYY-MM" string, not asserting the exact value (test-run-date-dependent)
+
+
+def test_monthly_profit_sums_only_realized_pnl_this_calendar_month(auth_client):
+    """Realized P&L only (pnl IS NOT NULL, i.e. a closed trade) -- an
+    OPEN position (pnl=None, same as a fresh entry in state.trade_log)
+    must never count toward the goal until it actually closes. A trade
+    from a PRIOR calendar month must not count toward the current
+    month's total either."""
+    import state
+    import datetime as dt
+
+    now = dt.datetime.now(dt.timezone.utc)
+    this_month_early = now.replace(day=1, hour=1, minute=0, second=0, microsecond=0)
+    last_month = (this_month_early - dt.timedelta(days=1)).replace(hour=12)
+
+    state.trade_log.extend([
+        {  # closed win, THIS month -- counts
+            "time": this_month_early.isoformat(), "action": "sell", "symbol": "AAPL",
+            "asset_class": "stock", "qty": 10, "price": "200.00", "pnl": 60.0,
+            "regime": None, "source": "webhook", "explanation": None, "strategy_id": None,
+        },
+        {  # closed loss, THIS month -- counts
+            "time": now.isoformat(), "action": "sell", "symbol": "RBLX",
+            "asset_class": "stock", "qty": 5, "price": "50.00", "pnl": -15.0,
+            "regime": None, "source": "webhook", "explanation": None, "strategy_id": None,
+        },
+        {  # still OPEN (pnl=None) -- must NOT count even though it's this month
+            "time": now.isoformat(), "action": "buy", "symbol": "HOOD",
+            "asset_class": "stock", "qty": 8, "price": "100.00", "pnl": None,
+            "regime": None, "source": "webhook", "explanation": None, "strategy_id": None,
+        },
+        {  # closed win, LAST month -- must NOT count toward this month
+            "time": last_month.isoformat(), "action": "sell", "symbol": "BTC/USD",
+            "asset_class": "crypto", "qty": 0.01, "price": "60000.00", "pnl": 500.0,
+            "regime": None, "source": "webhook", "explanation": None, "strategy_id": None,
+        },
+    ])
+
+    mp = auth_client.get("/api/dashboard").get_json()["monthly_profit"]
+    assert mp["realized_pnl"] == 45.0  # 60.0 - 15.0, NOT +500 (last month) or the open HOOD position
+
+
+def test_monthly_profit_pct_of_goal_computed_against_the_live_goal(auth_client):
+    import state
+    import datetime as dt
+
+    state.monthly_profit_goal = 200.0
+    state.trade_log.append({
+        "time": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "action": "sell", "symbol": "AAPL", "asset_class": "stock", "qty": 1, "price": "100.00",
+        "pnl": 100.0, "regime": None, "source": "webhook", "explanation": None, "strategy_id": None,
+    })
+
+    mp = auth_client.get("/api/dashboard").get_json()["monthly_profit"]
+    assert mp["goal"] == 200.0
+    assert mp["realized_pnl"] == 100.0
+    assert mp["pct_of_goal"] == 50.0
+
+
+# --- /api/settings/monthly_profit_goal ------------------------------------
+
+def test_monthly_profit_goal_requires_auth(client):
+    resp = client.post("/api/settings/monthly_profit_goal", json={"goal": 1200})
+    assert resp.status_code == 401
+
+
+def test_monthly_profit_goal_update_persists_and_reads_back(auth_client, db_store):
+    import state
+
+    resp = auth_client.post("/api/settings/monthly_profit_goal", json={"goal": 1200})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "updated", "monthly_profit_goal": 1200.0}
+    assert state.monthly_profit_goal == 1200.0
+    assert db_store["settings"]["monthly_profit_goal"] == "1200.0"
+
+    dash_goal = auth_client.get("/api/dashboard").get_json()["monthly_profit"]["goal"]
+    assert dash_goal == 1200.0
+
+
+def test_monthly_profit_goal_rejects_missing_or_invalid_value(auth_client):
+    assert auth_client.post("/api/settings/monthly_profit_goal", json={}).status_code == 400
+    assert auth_client.post("/api/settings/monthly_profit_goal", json={"goal": "not-a-number"}).status_code == 400
+    assert auth_client.post("/api/settings/monthly_profit_goal", json={"goal": -50}).status_code == 400
+
+
 # --- /api/dashboard excludes dust positions from display/count (per Eli:
 # they were cluttering the Positions widget/page and skewing counts) ---
 

@@ -142,6 +142,44 @@ function WatchlistRow({ assetClass, symbols, onAdded }) {
   );
 }
 
+// "Rent generator" monthly profit goal -- a single account-wide number,
+// not per-asset-class like everything else on this page, so it gets its
+// own small card rather than folding into RiskCard's per-class layout.
+function MonthlyProfitGoalCard({ goal, onSaved }) {
+  const [value, setValue] = useState(goal);
+  const [status, setStatus] = useState(null);
+
+  useEffect(() => {
+    setValue(goal);
+  }, [goal]);
+
+  const save = async () => {
+    setStatus('saving');
+    try {
+      await api.updateMonthlyProfitGoal(Number(value));
+      setStatus('saved');
+      onSaved?.();
+      setTimeout(() => setStatus(null), 1500);
+    } catch (e) {
+      setStatus(e.message);
+    }
+  };
+
+  return (
+    <div className="card">
+      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 160 }}>
+          <Field label="Monthly profit goal ($)" value={value} onChange={setValue} />
+        </div>
+        <button className="button button-accent" onClick={save} disabled={status === 'saving'}>
+          {status === 'saved' ? 'Saved' : status === 'saving' ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+      {status && status !== 'saving' && status !== 'saved' && <div className="error-text" style={{ marginTop: 8 }}>{status}</div>}
+    </div>
+  );
+}
+
 export function Settings() {
   const { data, loading, refetch } = useDashboard();
 
@@ -176,6 +214,15 @@ export function Settings() {
             <WatchlistRow key={ac} assetClass={ac} symbols={data.watched_symbols[ac] || []} onAdded={refetch} />
           ))}
         </div>
+      </div>
+
+      <div className="section">
+        <div className="section-title">Rent generator goal</div>
+        <div className="page-subtitle" style={{ marginBottom: 12 }}>
+          The monthly realized-P&amp;L target the dashboard's Monthly Profit widget tracks against. Resets
+          automatically at the start of each calendar month.
+        </div>
+        <MonthlyProfitGoalCard goal={data.monthly_profit?.goal ?? 900} onSaved={refetch} />
       </div>
     </div>
   );

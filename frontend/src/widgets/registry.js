@@ -10,6 +10,7 @@ import { WatchlistCapacityWidget } from './WatchlistCapacityWidget.jsx';
 import { TradeRationaleWidget } from './TradeRationaleWidget.jsx';
 import { AlertHealthWidget } from './AlertHealthWidget.jsx';
 import { RecentErrorsWidget } from './RecentErrorsWidget.jsx';
+import { MonthlyProfitWidget } from './MonthlyProfitWidget.jsx';
 
 // Single source of truth for every widget the dashboard grid knows
 // about: id, display title, its summary component, and the detail page
@@ -34,9 +35,13 @@ export const WIDGET_REGISTRY = {
     description: "Time since the last webhook signal received per watched symbol, so a TradingView alert that's gone silent is easy to spot.",
   },
   recentErrors: { title: 'Recent errors', Component: RecentErrorsWidget, to: null },
+  monthlyProfit: {
+    title: 'Monthly profit', Component: MonthlyProfitWidget, to: '/trades',
+    description: 'Month-to-date REALIZED P&L (closed trades only, not open-position P&L or the equity curve) against the monthly goal set in Settings. Resets each calendar month.',
+  },
 };
 
 export const DEFAULT_WIDGET_IDS = [
-  'equity', 'positions', 'risk', 'tradelog', 'regime', 'backtest', 'hermes', 'notes',
+  'monthlyProfit', 'equity', 'positions', 'risk', 'tradelog', 'regime', 'backtest', 'hermes', 'notes',
   'watchlistCapacity', 'tradeRationale', 'alertHealth', 'recentErrors',
 ];

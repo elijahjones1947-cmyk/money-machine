@@ -121,6 +121,10 @@ def load_persisted_state():
         if saved_max:
             state.max_trades_per_day.update(saved_max)
 
+        saved_profit_goal = db.get_setting("monthly_profit_goal")
+        if saved_profit_goal is not None:
+            state.monthly_profit_goal = saved_profit_goal
+
         # Merge per-asset-class, not replace wholesale -- state.risk_caps
         # already has every key config.py currently defines (deep-copied
         # before this runs); a persisted blob saved before a new key like
@@ -1084,6 +1088,28 @@ def api_dashboard():
     best_trade = round(max([t['pnl'] for t in wins] or [0]), 2)
     worst_trade = round(abs(min([t['pnl'] for t in losses] or [0])), 2)
 
+    # "Rent generator" monthly profit tracker -- REALIZED P&L only (the
+    # same `completed`/pnl-is-not-None list every other stat above
+    # already uses), never the equity curve or any unrealized/open-
+    # position number, so an open position sitting at a paper gain never
+    # counts until it actually closes. Calendar month in UTC (matching
+    # every other timestamp convention in this app), resets naturally
+    # the moment the wall clock crosses into a new month -- nothing
+    # persisted or reset explicitly, this is just a live filter re-run
+    # on every /api/dashboard call.
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    month_start = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_pnl = sum(
+        t['pnl'] for t in completed
+        if datetime.datetime.fromisoformat(t['time']) >= month_start
+    )
+    monthly_profit = {
+        'realized_pnl': round(month_pnl, 2),
+        'goal': state.monthly_profit_goal,
+        'pct_of_goal': round(month_pnl / state.monthly_profit_goal * 100, 1) if state.monthly_profit_goal else None,
+        'month': month_start.strftime('%Y-%m'),
+    }
+
     regimes = []
     for asset_class, symbols in state.watched_symbols.items():
         for sym in symbols:
@@ -1155,6 +1181,7 @@ def api_dashboard():
         'regimes': regimes,
         'risk_caps': state.risk_caps,  # live/editable, not the static config.py defaults -- see Settings
         'alert_health': alert_health,
+        'monthly_profit': monthly_profit,
     })
 
 
@@ -1278,6 +1305,34 @@ def settings():
             logging.warning('Could not persist risk_caps to DB: {}'.format(e))
 
     return jsonify({'status': 'updated'})
+
+
+@app.route('/api/settings/monthly_profit_goal', methods=['POST'])
+def api_monthly_profit_goal():
+    """Session-gated. A separate route from /api/settings above rather
+    than folded into it -- that route's whole shape (asset_class + a set
+    of per-asset-class fields) doesn't fit an account-wide, non-asset-
+    class value like this one, and bending it to accept an optional/
+    missing asset_class would have meant touching that route's existing,
+    already-tested validation for something unrelated. Same persistence
+    pattern as every other Settings field (state + db.save_setting)."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+    data = request.json or {}
+    if 'goal' not in data:
+        return jsonify({'error': 'goal is required'}), 400
+    try:
+        goal = float(data['goal'])
+    except (TypeError, ValueError):
+        return jsonify({'error': 'invalid value for goal'}), 400
+    if goal < 0:
+        return jsonify({'error': 'goal must be >= 0'}), 400
+    state.monthly_profit_goal = goal
+    try:
+        db.save_setting('monthly_profit_goal', state.monthly_profit_goal)
+    except Exception as e:
+        logging.warning('Could not persist monthly_profit_goal to DB: {}'.format(e))
+    return jsonify({'status': 'updated', 'monthly_profit_goal': state.monthly_profit_goal})
 
 
 @app.route('/api/watchlist', methods=['POST'])

@@ -61,6 +61,13 @@ max_trades_per_day = {"stock": 20, "forex": 20, "crypto": 10}
 risk_percent = {"stock": 10, "forex": 10, "crypto": 3}
 trades_today = {"stock": 0, "forex": 0, "crypto": 0}
 
+# The dashboard's "rent generator" monthly profit tracker -- Eli's target
+# for realized P&L (closed trades only, not unrealized/open-position
+# P&L) to cover in a calendar month. Editable via Settings
+# (/api/settings/monthly_profit_goal), persisted the same
+# save_setting/load_persisted_state round trip as risk_percent above.
+monthly_profit_goal = 900.0
+
 # Populated at startup from config.get_risk_config() (a deep copy, not
 # the same dict -- see server.py) and merged with any persisted
 # Settings overrides in load_persisted_state(). This is the single
