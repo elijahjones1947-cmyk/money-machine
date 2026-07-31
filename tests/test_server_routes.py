@@ -2166,3 +2166,32 @@ def test_notes_create_rejects_empty_content(auth_client):
 def test_notes_delete_nonexistent_returns_404(auth_client):
     resp = auth_client.delete("/api/notes/999")
     assert resp.status_code == 404
+
+
+def test_notes_update_requires_auth(client):
+    assert client.put("/api/notes/1", json={"content": "hi"}).status_code == 401
+
+
+def test_notes_update_changes_content_without_changing_created_at(auth_client):
+    created = auth_client.post("/api/notes", json={"content": "original"}).get_json()
+
+    update_resp = auth_client.put("/api/notes/{}".format(created["id"]), json={"content": "edited"})
+    assert update_resp.status_code == 200
+    updated = update_resp.get_json()
+    assert updated["content"] == "edited"
+    assert updated["created_at"] == created["created_at"]
+
+    notes = auth_client.get("/api/notes").get_json()["notes"]
+    assert notes == [updated]
+
+
+def test_notes_update_rejects_empty_content(auth_client):
+    created = auth_client.post("/api/notes", json={"content": "original"}).get_json()
+    resp = auth_client.put("/api/notes/{}".format(created["id"]), json={"content": "   "})
+    assert resp.status_code == 400
+    assert auth_client.get("/api/notes").get_json()["notes"][0]["content"] == "original"
+
+
+def test_notes_update_nonexistent_returns_404(auth_client):
+    resp = auth_client.put("/api/notes/999", json={"content": "hi"})
+    assert resp.status_code == 404

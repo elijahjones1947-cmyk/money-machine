@@ -2075,6 +2075,27 @@ def api_delete_note(note_id):
     return jsonify({'status': 'deleted', 'id': note_id})
 
 
+@app.route('/api/notes/<int:note_id>', methods=['PUT'])
+def api_update_note(note_id):
+    """Session-gated. Edits a note's content in place -- created_at
+    (and its position in the newest-first list) is untouched, this is
+    purely a content fix, not a new note."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+    data = request.json or {}
+    content = (data.get('content') or '').strip()
+    if not content:
+        return jsonify({'error': 'content is required'}), 400
+    try:
+        note = db.update_note(note_id, content)
+    except Exception as e:
+        logging.error('Could not update note {}: {}'.format(note_id, e))
+        return jsonify({'error': 'failed to update note'}), 500
+    if note is None:
+        return jsonify({'error': 'no such note: {}'.format(note_id)}), 404
+    return jsonify(note)
+
+
 @app.route('/api/manual_trade', methods=['POST'])
 def api_manual_trade():
     """SPA-facing route for the dashboard's manual buy/sell buttons — gated

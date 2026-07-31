@@ -277,6 +277,14 @@ def _dispatch(store, sql_upper, params, as_dict):
         store["notes"][:] = [r for r in store["notes"] if r["id"] != note_id]
         return [{"deleted": True}] if len(store["notes"]) < before else []
 
+    if sql_upper.startswith("UPDATE NOTES SET CONTENT"):
+        content, note_id = params
+        for row in store["notes"]:
+            if row["id"] == note_id:
+                row["content"] = content
+                return [dict(row)]
+        return []
+
     raise AssertionError("Fake DB got an unrecognized query: {!r}".format(sql_upper))
 
 

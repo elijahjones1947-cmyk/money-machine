@@ -679,3 +679,21 @@ def delete_note(note_id):
         with conn.cursor() as cur:
             cur.execute("DELETE FROM notes WHERE id = %s;", (note_id,))
             return cur.rowcount > 0
+
+
+def update_note(note_id, content):
+    """Returns the updated row, or None if note_id didn't exist --
+    same "tell a real update apart from a no-op" reasoning as
+    delete_note above. created_at is deliberately untouched (edits
+    don't bump a note back to the top of the newest-first list)."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                UPDATE notes SET content = %s WHERE id = %s
+                RETURNING id, content, created_at;
+                """,
+                (content, note_id),
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None

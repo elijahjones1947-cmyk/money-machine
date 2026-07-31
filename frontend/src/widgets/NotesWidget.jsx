@@ -16,19 +16,28 @@ export function NotesWidget() {
   if (notes === null) return <div className="empty-state">Loading…</div>;
   if (notes.length === 0) return <div className="empty-state">No notes yet</div>;
 
-  const latest = notes[0];
+  // Show several recent notes, each clamped to 2 lines but scrollable
+  // within the widget body (Widget.css already sets overflow:auto
+  // there) -- a single ellipsis-truncated line hid everything past the
+  // very latest note; this at least surfaces the last 5 at a glance.
+  const recent = notes.slice(0, 5);
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, height: '100%' }}>
       <div className="metric">
         <span className="metric-label">Notes</span>
         <span className="metric-value" style={{ fontSize: 28 }}>{notes.length}</span>
       </div>
-      <div style={{
-        fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden',
-        textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-      }}>
-        Latest: {latest.content}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {recent.map((note) => (
+          <div key={note.id} style={{
+            fontSize: 12, color: 'var(--text-secondary)', overflow: 'hidden',
+            textOverflow: 'ellipsis', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+            borderBottom: '1px solid var(--border)', paddingBottom: 6,
+          }}>
+            {note.content}
+          </div>
+        ))}
       </div>
     </div>
   );
