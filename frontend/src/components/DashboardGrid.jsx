@@ -15,9 +15,9 @@ export function DashboardGrid() {
 
       <div className="dashboard-grid">
         {DEFAULT_WIDGET_IDS.map((id) => {
-          const { title, description, Component, to } = WIDGET_REGISTRY[id];
+          const { title, description, Component, to, compact } = WIDGET_REGISTRY[id];
           return (
-            <Widget key={id} title={title} description={description} to={to}>
+            <Widget key={id} title={title} description={description} to={to} compact={compact}>
               <Component />
             </Widget>
           );

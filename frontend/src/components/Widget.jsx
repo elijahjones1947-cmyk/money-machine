@@ -9,7 +9,7 @@ import './Widget.css';
 // dependencies, works with keyboard/AT via the browser's own tooltip
 // handling) rather than inventing a bespoke per-widget approach. Widgets
 // that don't pass it render exactly as before.
-export function Widget({ title, description, to, children }) {
+export function Widget({ title, description, to, compact, children }) {
   const body = (
     <div className="widget">
       <div className="widget-header">
@@ -25,7 +25,7 @@ export function Widget({ title, description, to, children }) {
   );
 
   return (
-    <div className="widget-shell">
+    <div className={`widget-shell${compact ? ' widget-shell--compact' : ''}`}>
       {to ? <Link className="widget-link" to={to}>{body}</Link> : body}
     </div>
   );

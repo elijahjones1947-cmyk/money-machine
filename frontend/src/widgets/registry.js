@@ -1,5 +1,5 @@
 import { PositionsWidget } from './PositionsWidget.jsx';
-import { RiskWidget } from './RiskWidget.jsx';
+import { StockHaltWidget, ForexHaltWidget, CryptoHaltWidget } from './HaltStatusWidgets.jsx';
 import { TradeLogWidget } from './TradeLogWidget.jsx';
 import { RegimeWidget } from './RegimeWidget.jsx';
 import { BacktestWidget } from './BacktestWidget.jsx';
@@ -21,7 +21,6 @@ import { MonthlyProfitWidget } from './MonthlyProfitWidget.jsx';
 // from its title + content alone.
 export const WIDGET_REGISTRY = {
   positions: { title: 'Positions', Component: PositionsWidget, to: '/positions' },
-  risk: { title: 'Halt status', Component: RiskWidget, to: '/risk' },
   tradelog: { title: 'Trade log', Component: TradeLogWidget, to: '/trades' },
   regime: { title: 'Regime', Component: RegimeWidget, to: '/regime' },
   backtest: { title: 'Backtest & live', Component: BacktestWidget, to: '/backtest' },
@@ -42,9 +41,18 @@ export const WIDGET_REGISTRY = {
     title: 'Monthly profit', Component: MonthlyProfitWidget, to: '/monthly-profit',
     description: 'Month-to-date REALIZED P&L (closed trades only, not open-position P&L or the equity curve) against the monthly goal set in Settings. Resets each calendar month.',
   },
+  // Split out of the single, taller "Halt status" card into 3 compact
+  // per-asset-class widgets -- same underlying /api/dashboard risk_state
+  // data, all tapping through to the same /risk detail page (not
+  // duplicated info across 3 pages, just 3 small glances at one).
+  riskStock: { title: 'Stock halt', Component: StockHaltWidget, to: '/risk', compact: true },
+  riskForex: { title: 'Forex halt', Component: ForexHaltWidget, to: '/risk', compact: true },
+  riskCrypto: { title: 'Crypto halt', Component: CryptoHaltWidget, to: '/risk', compact: true },
 };
 
 export const DEFAULT_WIDGET_IDS = [
-  'monthlyProfit', 'equity', 'positions', 'risk', 'tradelog', 'regime', 'backtest', 'hermes', 'notes',
+  'monthlyProfit', 'equity', 'positions', 'tradelog', 'regime', 'backtest', 'hermes', 'notes',
   'watchlistCapacity', 'tradeRationale', 'alertHealth', 'recentErrors',
+  // Compact widgets last so they land at the bottom of the grid.
+  'riskStock', 'riskForex', 'riskCrypto',
 ];

@@ -34,6 +34,20 @@
   animation: widget-rise-in 0.4s ease backwards;
 }
 
+/* Opt-in smaller footprint for widgets with almost no content (e.g.
+   the 3 per-asset-class halt widgets) -- avoids wasting the full
+   320px default height on a dot and a word. min-height is reset here
+   too (not just height): the mobile media query below sets its own
+   min-height on the base .widget-shell rule, and min-height always
+   wins over a smaller height regardless of selector specificity since
+   they're different properties, not a specificity conflict -- without
+   this line the compact widgets would render at the mobile floor
+   height instead of their own, smaller one. */
+.dashboard-grid .widget-shell.widget-shell--compact {
+  height: 90px;
+  min-height: 0;
+}
+
 /* Staggered fade+rise entrance, first 10 widgets get an incrementally
    later delay so the grid fills in left-to-right/top-to-bottom instead
    of all popping in at once -- purely decorative, one-time on mount,

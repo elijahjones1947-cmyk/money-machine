@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useDashboard } from '../hooks/useDashboard.js';
+import { useAuth } from '../context/AuthContext.jsx';
 import { api } from '../api.js';
 import './Settings.css';
 
@@ -207,6 +208,7 @@ function MonthlyProfitGoalCard({ goal, onSaved }) {
 
 export function Settings() {
   const { data, loading, refetch } = useDashboard();
+  const { logout } = useAuth();
 
   if (loading || !data) return <div className="empty-state">Loading…</div>;
 
@@ -248,6 +250,14 @@ export function Settings() {
           automatically at the start of each calendar month.
         </div>
         <MonthlyProfitGoalCard goal={data.monthly_profit?.goal ?? 900} onSaved={refetch} />
+      </div>
+
+      <div className="section">
+        <div className="section-title">Account</div>
+        <div className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Signed in to this dashboard.</span>
+          <button className="button button-danger" onClick={logout}>Log out</button>
+        </div>
       </div>
     </div>
   );
