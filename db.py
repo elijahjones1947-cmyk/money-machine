@@ -488,6 +488,29 @@ def get_stuck_webhook_signals():
             return cur.fetchall()
 
 
+def get_recent_webhook_signals(limit=200):
+    """Every AUTHENTICATED webhook signal (secret + validation already
+    passed -- see server.py's webhook() docstring on where
+    enqueue_webhook_signal() is actually called relative to the secret
+    check), newest first. This is the durable history the Alert Health
+    detail page groups by symbol -- unlike state.last_webhook_at (in-
+    memory, resets on every restart, and stamped for EVERY inbound hit
+    including bad-secret ones), this only ever shows real, accepted
+    alerts, but survives restarts and actually has a history to show."""
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                SELECT id, symbol, action, manual_flag, status, received_at, completed_at, error_message
+                FROM webhook_signals
+                ORDER BY received_at DESC
+                LIMIT %s;
+                """,
+                (limit,),
+            )
+            return cur.fetchall()
+
+
 # --- Strategy definitions + per-symbol assignment (Phase 0/4) ------------
 # See init_schema()'s comments on `strategies`/`symbol_strategy_assignments`
 # for the versioning/immutability model.

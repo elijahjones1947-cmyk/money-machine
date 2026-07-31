@@ -171,6 +171,15 @@ def _dispatch(store, sql_upper, params, as_dict):
                 row["error_message"] = error_message
         return []
 
+    # Checked BEFORE the shorter "SELECT ID, SYMBOL, ACTION, MANUAL_FLAG"
+    # prefix below -- this query's column list is a superset of that
+    # one's, so it would otherwise wrongly match the pending-only branch
+    # (sequential prefix matching, not a dict lookup -- order matters).
+    if sql_upper.startswith("SELECT ID, SYMBOL, ACTION, MANUAL_FLAG, STATUS, RECEIVED_AT, COMPLETED_AT, ERROR_MESSAGE"):
+        (limit,) = params
+        rows = sorted(store["webhook_signals"], key=lambda r: r["received_at"], reverse=True)
+        return [dict(r) for r in rows[:limit]]
+
     if sql_upper.startswith("SELECT ID, SYMBOL, ACTION, MANUAL_FLAG"):
         return [dict(r) for r in store["webhook_signals"] if r["status"] == "pending"]
 

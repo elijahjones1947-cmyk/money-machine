@@ -19,6 +19,7 @@ import { TradeRationaleDetail } from './pages/TradeRationaleDetail.jsx';
 import { MonthlyProfitDetail } from './pages/MonthlyProfitDetail.jsx';
 import { RecentErrorsDetail } from './pages/RecentErrorsDetail.jsx';
 import { WatchlistCapacityDetail } from './pages/WatchlistCapacityDetail.jsx';
+import { AlertHealthDetail } from './pages/AlertHealthDetail.jsx';
 
 const THEME_STORAGE_KEY = 'rentgen-theme';
 
@@ -42,6 +43,7 @@ function AppShell({ theme, onThemeChange }) {
           <Route path="/monthly-profit" element={<MonthlyProfitDetail />} />
           <Route path="/errors" element={<RecentErrorsDetail />} />
           <Route path="/capacity" element={<WatchlistCapacityDetail />} />
+          <Route path="/alert-health" element={<AlertHealthDetail />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

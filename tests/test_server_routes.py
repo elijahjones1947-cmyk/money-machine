@@ -2195,3 +2195,49 @@ def test_notes_update_rejects_empty_content(auth_client):
 def test_notes_update_nonexistent_returns_404(auth_client):
     resp = auth_client.put("/api/notes/999", json={"content": "hi"})
     assert resp.status_code == 404
+
+
+# --- /api/webhook_signals (Alert Health detail page's per-symbol history) --
+
+def test_webhook_signals_requires_auth(client):
+    assert client.get("/api/webhook_signals").status_code == 401
+
+
+def test_webhook_signals_lists_newest_first_and_respects_limit(auth_client, db_store):
+    import datetime as dt
+
+    now = dt.datetime.now(dt.timezone.utc)
+    db_store["webhook_signals"].extend([
+        {
+            "id": 1, "symbol": "AAPL", "action": "buy", "manual_flag": False, "status": "done",
+            "received_at": now - dt.timedelta(minutes=10), "completed_at": now - dt.timedelta(minutes=10),
+            "error_message": None,
+        },
+        {
+            "id": 2, "symbol": "GBP_JPY", "action": "sell", "manual_flag": False, "status": "failed",
+            "received_at": now - dt.timedelta(minutes=5), "completed_at": now - dt.timedelta(minutes=5),
+            "error_message": "no long position to sell",
+        },
+        {
+            "id": 3, "symbol": "AAPL", "action": "sell", "manual_flag": True, "status": "done",
+            "received_at": now, "completed_at": now, "error_message": None,
+        },
+    ])
+
+    resp = auth_client.get("/api/webhook_signals")
+    assert resp.status_code == 200
+    signals = resp.get_json()["signals"]
+    assert [s["id"] for s in signals] == [3, 2, 1]  # newest first
+    assert signals[0]["symbol"] == "AAPL"
+    assert signals[0]["manual_flag"] is True
+    assert signals[1]["status"] == "failed"
+    assert signals[1]["error_message"] == "no long position to sell"
+
+    limited = auth_client.get("/api/webhook_signals?limit=1").get_json()["signals"]
+    assert [s["id"] for s in limited] == [3]
+
+
+def test_webhook_signals_empty_when_none_received(auth_client):
+    resp = auth_client.get("/api/webhook_signals")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"signals": []}

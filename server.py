@@ -1278,6 +1278,34 @@ def api_errors():
     ]})
 
 
+@app.route('/api/webhook_signals')
+def api_webhook_signals():
+    """Session-gated. Recent AUTHENTICATED webhook signals (see
+    db.get_recent_webhook_signals's docstring on why this, not
+    state.last_webhook_at, is the source for a real per-symbol alert
+    HISTORY) -- backs the Alert Health detail page's per-symbol feed,
+    distinct from /api/dashboard's alert_health block (current status
+    only, no history)."""
+    if not session.get('auth'):
+        return jsonify({'error': 'unauthorized'}), 401
+    limit = request.args.get('limit', default=200, type=int)
+    try:
+        rows = db.get_recent_webhook_signals(limit=limit)
+    except Exception as e:
+        logging.error('Could not list recent webhook signals: {}'.format(e))
+        return jsonify({'error': 'failed to list webhook signals'}), 500
+    return jsonify({'signals': [
+        {
+            'id': r['id'], 'symbol': r['symbol'], 'action': r['action'], 'manual_flag': r['manual_flag'],
+            'status': r['status'],
+            'received_at': r['received_at'].isoformat() if r.get('received_at') else None,
+            'completed_at': r['completed_at'].isoformat() if r.get('completed_at') else None,
+            'error_message': r['error_message'],
+        }
+        for r in rows
+    ]})
+
+
 @app.route('/api/toggle_bot', methods=['POST'])
 def toggle_bot():
     if not session.get('auth'):

@@ -79,6 +79,7 @@ export const api = {
   deleteNote: (id) => request(`/api/notes/${id}`, { method: 'DELETE' }),
 
   listErrors: (limit = 20) => request(`/api/errors?limit=${limit}`),
+  listWebhookSignals: (limit = 200) => request(`/api/webhook_signals?limit=${limit}`),
 
   updateMonthlyProfitGoal: (goal) =>
     request('/api/settings/monthly_profit_goal', { method: 'POST', body: JSON.stringify({ goal }) }),

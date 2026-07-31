@@ -34,7 +34,7 @@ export const WIDGET_REGISTRY = {
   },
   tradeRationale: { title: 'Trade rationale', Component: TradeRationaleWidget, to: '/trade-rationale' },
   alertHealth: {
-    title: 'Alert health', Component: AlertHealthWidget, to: null,
+    title: 'Alert health', Component: AlertHealthWidget, to: '/alert-health',
     description: "Time since the last webhook signal received per watched symbol, so a TradingView alert that's gone silent is easy to spot.",
   },
   recentErrors: { title: 'Recent errors', Component: RecentErrorsWidget, to: '/errors' },
