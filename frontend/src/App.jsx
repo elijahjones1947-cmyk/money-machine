@@ -15,6 +15,10 @@ import { HermesChat } from './pages/HermesChat.jsx';
 import { Settings } from './pages/Settings.jsx';
 import { StrategiesDetail } from './pages/StrategiesDetail.jsx';
 import { NotesDetail } from './pages/NotesDetail.jsx';
+import { TradeRationaleDetail } from './pages/TradeRationaleDetail.jsx';
+import { MonthlyProfitDetail } from './pages/MonthlyProfitDetail.jsx';
+import { RecentErrorsDetail } from './pages/RecentErrorsDetail.jsx';
+import { WatchlistCapacityDetail } from './pages/WatchlistCapacityDetail.jsx';
 
 const THEME_STORAGE_KEY = 'rentgen-theme';
 
@@ -34,6 +38,10 @@ function AppShell({ theme, onThemeChange }) {
           <Route path="/hermes" element={<HermesChat />} />
           <Route path="/strategies" element={<StrategiesDetail />} />
           <Route path="/notes" element={<NotesDetail />} />
+          <Route path="/trade-rationale" element={<TradeRationaleDetail />} />
+          <Route path="/monthly-profit" element={<MonthlyProfitDetail />} />
+          <Route path="/errors" element={<RecentErrorsDetail />} />
+          <Route path="/capacity" element={<WatchlistCapacityDetail />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Routes>

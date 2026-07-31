@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { api } from '../api.js';
 
-// Dashboard-only widget (no detail page, per the roadmap) — status +
-// link into the full Hermes chat page.
+// The whole card is now a Link into /hermes (registry.js) like every
+// other widget with a detail page, so this no longer needs its own
+// inner "Open chat" link -- that used to be the ONLY way in (registry
+// had to: null), and nesting a second <a> inside the card-wide Link
+// Widget.jsx now renders would be invalid HTML/broken click behavior.
 export function HermesControlWidget() {
   const [configured, setConfigured] = useState(null);
 
@@ -17,9 +19,6 @@ export function HermesControlWidget() {
       <span className="metric-value" style={{ fontSize: 22, color: configured ? 'var(--accent)' : 'var(--text-muted)' }}>
         {configured === null ? 'Checking…' : configured ? 'Ready' : 'Not configured'}
       </span>
-      <Link to="/hermes" className="button" style={{ marginTop: 10, textAlign: 'center' }}>
-        Open chat
-      </Link>
     </div>
   );
 }

@@ -25,18 +25,21 @@ export const WIDGET_REGISTRY = {
   tradelog: { title: 'Trade log', Component: TradeLogWidget, to: '/trades' },
   regime: { title: 'Regime', Component: RegimeWidget, to: '/regime' },
   backtest: { title: 'Backtest & live', Component: BacktestWidget, to: '/backtest' },
-  hermes: { title: 'Hermes', Component: HermesControlWidget, to: null },
+  hermes: { title: 'Hermes', Component: HermesControlWidget, to: '/hermes' },
   equity: { title: 'Equity', Component: EquityWidget, to: '/equity' },
   notes: { title: 'Notes', Component: NotesWidget, to: '/notes' },
-  watchlistCapacity: { title: 'Bucket of Funds capacity', Component: WatchlistCapacityWidget, to: '/settings' },
-  tradeRationale: { title: 'Trade rationale', Component: TradeRationaleWidget, to: '/trades' },
+  watchlistCapacity: {
+    title: 'Bucket of Funds capacity', Component: WatchlistCapacityWidget, to: '/capacity',
+    description: 'Read-only view of watchlist size vs. the max_open_positions cap per asset class. To change the cap or the watchlist itself, use Settings.',
+  },
+  tradeRationale: { title: 'Trade rationale', Component: TradeRationaleWidget, to: '/trade-rationale' },
   alertHealth: {
     title: 'Alert health', Component: AlertHealthWidget, to: null,
     description: "Time since the last webhook signal received per watched symbol, so a TradingView alert that's gone silent is easy to spot.",
   },
-  recentErrors: { title: 'Recent errors', Component: RecentErrorsWidget, to: null },
+  recentErrors: { title: 'Recent errors', Component: RecentErrorsWidget, to: '/errors' },
   monthlyProfit: {
-    title: 'Monthly profit', Component: MonthlyProfitWidget, to: '/trades',
+    title: 'Monthly profit', Component: MonthlyProfitWidget, to: '/monthly-profit',
     description: 'Month-to-date REALIZED P&L (closed trades only, not open-position P&L or the equity curve) against the monthly goal set in Settings. Resets each calendar month.',
   },
 };
