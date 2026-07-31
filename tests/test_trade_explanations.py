@@ -86,6 +86,17 @@ def test_price_formatting_matches_asset_class_precision():
     assert "61234.5000" in crypto_text
 
 
+def test_entry_reports_which_broker_executed_it():
+    """Stock and crypto share one Alpaca account; forex is OANDA -- same
+    mapping as server.py's BROKERS dict, just stated in the rationale."""
+    stock_text = te.explain_entry("buy", "AAPL", "stock", 212.3, None, DEFAULT_PARAMS)
+    forex_text = te.explain_entry("buy", "EUR_USD", "forex", 1.0855, None, DEFAULT_PARAMS)
+    crypto_text = te.explain_entry("buy", "BTC/USD", "crypto", 61234.5, None, DEFAULT_PARAMS)
+    assert stock_text.endswith("Executed via Alpaca.")
+    assert forex_text.endswith("Executed via OANDA.")
+    assert crypto_text.endswith("Executed via Alpaca.")
+
+
 # --- detected_patterns enrichment (Phase 3) ------------------------------
 
 def test_detected_candlestick_pattern_folded_into_the_explanation():

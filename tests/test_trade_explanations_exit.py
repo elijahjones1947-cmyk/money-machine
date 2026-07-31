@@ -73,7 +73,7 @@ def test_classify_short_trailing_stop():
 
 def test_explain_exit_manual_close_is_definitive_no_inference_needed():
     text = te.explain_exit("sell", "AAPL", "stock", 212.34, "manual_close")
-    assert text == "Exited via manual close: operator-initiated at 212.34."
+    assert text == "Exited via manual close: operator-initiated at 212.34. Executed via Alpaca."
 
 
 def test_explain_exit_safety_stop_loss_is_definitive():
@@ -84,7 +84,7 @@ def test_explain_exit_safety_stop_loss_is_definitive():
 
 def test_explain_exit_manual_trade_is_definitive():
     text = te.explain_exit("sell", "AAPL", "stock", 212.34, "manual")
-    assert text == "Exited via manual trade: operator-initiated at 212.34."
+    assert text == "Exited via manual trade: operator-initiated at 212.34. Executed via Alpaca."
 
 
 # --- explain_exit: webhook (needs classification) ---------------------------
@@ -230,11 +230,13 @@ def test_icc_webhook_exit_without_entry_trade_omits_pct_but_still_explains():
 
 def test_icc_exit_still_definitive_for_non_webhook_sources():
     """manual_close/safety_stop_loss/manual/strategy_switch already have
-    a definitive, non-inferred reason regardless of strategy family --
-    strategy_name must not change any of those, only the 'webhook'
-    classification path."""
+    a definitive, non-inferred REASON regardless of strategy family --
+    strategy_name must not change the classification for any of those,
+    only the 'webhook' classification path. It still gets appended to
+    the text itself (every exit reports the strategy in effect at exit
+    time now), just without altering the "why" being reported."""
     text = te.explain_exit("sell", "SMR", "stock", 101.0, "manual_close", strategy_name="Kev's ICC")
-    assert text == "Exited via manual close: operator-initiated at 101.00."
+    assert text == "Exited via manual close: operator-initiated at 101.00. Executed via Alpaca. Strategy assigned at exit: Kev's ICC."
 
 
 def test_hhb_exit_unaffected_when_strategy_name_is_none_or_hhb():
@@ -247,5 +249,7 @@ def test_hhb_exit_unaffected_when_strategy_name_is_none_or_hhb():
         "sell", "AAPL", "stock", 101.0, "webhook", entry_trade=entry_trade, params=PARAMS, broker=broker,
         strategy_name="Higher High Breakout",
     )
-    assert baseline == with_hhb_name
+    # Classification/wording is identical either way -- strategy_name
+    # only adds its own trailing clause, never changes the reasoning.
+    assert with_hhb_name == baseline + " Strategy assigned at exit: Higher High Breakout."
     assert "take-profit target" in baseline

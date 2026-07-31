@@ -103,8 +103,32 @@ def _explain_icc_entry(action, price_str, origin, params, is_manual):
     return "Entered {}{}: at {}. {}".format(direction, origin, price_str, clause)
 
 
+def _broker_name(asset_class):
+    """Same stock/forex/crypto -> broker mapping as server.py's BROKERS
+    dict, just as a display name -- stock and crypto share the one
+    Alpaca account, forex is OANDA. Kept here rather than passing the
+    broker instance through as a new param: asset_class is already
+    threaded through every call site, and this is purely cosmetic
+    (what to call it in the rationale text), not a behavioral lookup."""
+    return "OANDA" if asset_class == "forex" else "Alpaca"
+
+
 def explain_entry(action, symbol, asset_class, price, signal, params, is_manual=False, is_short=False,
                    detected_patterns=None, strategy_name=None):
+    """Thin wrapper around _explain_entry_core: appends which broker
+    executed the trade to whatever rationale text the core function
+    produced, so every return path gets it in exactly one place rather
+    than repeating it at each of the core function's several early
+    returns."""
+    text = _explain_entry_core(
+        action, symbol, asset_class, price, signal, params, is_manual, is_short,
+        detected_patterns, strategy_name,
+    )
+    return "{} Executed via {}.".format(text, _broker_name(asset_class))
+
+
+def _explain_entry_core(action, symbol, asset_class, price, signal, params, is_manual=False, is_short=False,
+                         detected_patterns=None, strategy_name=None):
     """
     action: 'buy' or 'sell' -- 'sell' here means a SHORT entry (forex
         only for HHB; stock/crypto never short in this app -- ICC can
@@ -361,6 +385,24 @@ _EXIT_REASON_LABELS = {
 
 def explain_exit(action, symbol, asset_class, price, source, entry_trade=None, params=None,
                   broker=None, timeframe="1h", strategy_name=None):
+    """Thin wrapper around _explain_exit_core: appends which broker
+    executed the trade (same one-place-not-every-return-path reasoning
+    as explain_entry's wrapper) and, when known, which strategy was
+    assigned to the symbol at the moment of exit -- useful after a
+    later reassignment, when the trade log would otherwise be the only
+    place that still reflects what was actually running at the time."""
+    text = _explain_exit_core(
+        action, symbol, asset_class, price, source, entry_trade, params,
+        broker, timeframe, strategy_name,
+    )
+    text = "{} Executed via {}.".format(text, _broker_name(asset_class))
+    if strategy_name:
+        text += " Strategy assigned at exit: {}.".format(strategy_name)
+    return text
+
+
+def _explain_exit_core(action, symbol, asset_class, price, source, entry_trade=None, params=None,
+                        broker=None, timeframe="1h", strategy_name=None):
     """
     action: 'sell' (closing a long) or 'buy' (closing a short, forex only).
     source: 'webhook' | 'manual' | 'manual_close' | 'safety_stop_loss' --
