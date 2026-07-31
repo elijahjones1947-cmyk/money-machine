@@ -81,7 +81,18 @@
     grid-template-columns: 1fr;
   }
 
+  /* A fixed card height exists to keep cards aligned across a ROW on
+     desktop -- on mobile there's only one column, nothing to align
+     against, so it just forces every card (even ones with two lines
+     of content) to reserve the same tall block, turning a scroll
+     through the dashboard into mostly empty space. min-height instead
+     of height lets each card shrink to its actual content, with a
+     floor so sparse widgets (Hermes, the halt-status trio) don't look
+     awkwardly cramped -- content that's still genuinely long (e.g. the
+     Trade Rationale/Notes feeds) keeps scrolling internally exactly as
+     before via .widget-body's own overflow: auto. */
   .dashboard-grid .widget-shell {
-    height: 280px;
+    height: auto;
+    min-height: 140px;
   }
 }

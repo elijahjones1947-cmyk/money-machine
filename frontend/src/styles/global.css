@@ -642,6 +642,22 @@ input:focus, select:focus, textarea:focus {
   gap: 12px;
 }
 
+/* Capped + internally scrollable in a multi-column card grid
+   (desktop), but a nested scroll region inside an already-scrolling
+   page is a fussy touch target on a phone -- let it grow to its
+   actual (already-bounded-to-15-rows) content height there instead. */
+.alert-health-history {
+  max-height: 180px;
+  overflow: auto;
+}
+
+@media (max-width: 640px) {
+  .alert-health-history {
+    max-height: none;
+    overflow: visible;
+  }
+}
+
 .regime-card-top {
   display: flex;
   align-items: flex-start;

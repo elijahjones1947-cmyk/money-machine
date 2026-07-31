@@ -97,7 +97,7 @@ export function AlertHealthDetail() {
                       </span>
                     </div>
 
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 180, overflow: 'auto' }}>
+                    <div className="alert-health-history" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                       {history.length === 0 ? (
                         <div className="empty-state" style={{ padding: 0, fontSize: 12 }}>No alerts recorded yet</div>
                       ) : (
