@@ -23,6 +23,14 @@
 
 .dashboard-grid .widget-shell {
   height: 320px;
+  /* Grid items default to min-width: auto, so a widget with long
+     unbroken text (e.g. RecentErrorsWidget/NotesWidget's ellipsis-
+     truncated lines) can force this item -- and the whole grid track,
+     and the page -- wider than the viewport instead of actually
+     clipping. Same fix already applied once elsewhere in this codebase
+     (Settings.css's .watchlist-add-form input) for the identical
+     overflow-on-mobile failure mode. */
+  min-width: 0;
   animation: widget-rise-in 0.4s ease backwards;
 }
 
