@@ -19,7 +19,10 @@ export function Login() {
   return (
     <div className="login-screen">
       <form className="login-card" onSubmit={handleSubmit}>
-        <div className="topbar-logo" style={{ marginBottom: 4 }}>Rent Generator</div>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, marginBottom: 4 }}>
+          <img src="/favicon.svg" alt="" width="32" height="32" style={{ borderRadius: 8 }} />
+          <span className="topbar-logo" style={{ fontSize: 22 }}>DC Bot</span>
+        </div>
         <div style={{ color: 'var(--text-secondary)', fontSize: 13, marginBottom: 8 }}>
           Sign in to your dashboard
         </div>

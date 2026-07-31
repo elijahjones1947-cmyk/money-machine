@@ -23,7 +23,10 @@ export function TopBar({ theme, onThemeChange }) {
           <span />
           <span />
         </Link>
-        <Link to="/dashboard" className="topbar-logo">Rent Generator</Link>
+        <Link to="/dashboard" style={{ display: 'flex', alignItems: 'center', gap: 8, textDecoration: 'none' }}>
+          <img src="/favicon.svg" alt="" width="26" height="26" style={{ borderRadius: 6 }} />
+          <span className="topbar-logo">DC Bot</span>
+        </Link>
         {data && <ModeToggle mode={data.trading_mode} />}
       </div>
       <div className="topbar-right">
