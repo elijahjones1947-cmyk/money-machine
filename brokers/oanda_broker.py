@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timedelta
 
 import requests
@@ -79,19 +80,46 @@ class OandaBroker(BrokerInterface):
         # auto-retried, so a request that actually reached OANDA but
         # timed out waiting for the response can't result in a
         # duplicate order. PUT (cancel_order) and GET (everything else)
-        # are safe to retry since they're idempotent. status_forcelist
-        # is left unset (no retries on HTTP error status codes), so
-        # _translate_error's handling of OANDA's own error responses is
-        # untouched -- only connection/read timeouts trigger a retry.
+        # are safe to retry since they're idempotent. status_forcelist is
+        # left unset here (this adapter never retries on HTTP error status
+        # codes) -- only connection/read timeouts trigger THIS retry. A
+        # separate, deliberate 401-specific retry is added below instead
+        # (_get/_put), not folded into this adapter -- see that comment.
         retry = Retry(total=1, connect=1, read=1, backoff_factor=0.3)
         adapter = HTTPAdapter(max_retries=retry)
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
 
+    # A 401 from OANDA has been observed in production to be intermittent
+    # and self-clearing (a follow-up call moments later succeeds against
+    # the exact same credentials) rather than a genuinely revoked/invalid
+    # key -- confirmed real HTTP 401 responses from OANDA itself, not a
+    # connection drop, so the urllib3 Retry adapter above never touches
+    # these (status_forcelist is deliberately unset there -- see its own
+    # comment). One extra attempt after a short pause, wired into every
+    # GET/PUT call site below (idempotent, safe to repeat) but
+    # deliberately NOT place_order's POST -- a request that already
+    # reached OANDA must never risk becoming a duplicate order.
+    _RETRY_401_BACKOFF_SECONDS = 0.5
+
+    def _get(self, url, params=None, timeout=10):
+        resp = self.session.get(url, params=params, timeout=timeout)
+        if resp.status_code == 401:
+            time.sleep(self._RETRY_401_BACKOFF_SECONDS)
+            resp = self.session.get(url, params=params, timeout=timeout)
+        return resp
+
+    def _put(self, url, timeout=10):
+        resp = self.session.put(url, timeout=timeout)
+        if resp.status_code == 401:
+            time.sleep(self._RETRY_401_BACKOFF_SECONDS)
+            resp = self.session.put(url, timeout=timeout)
+        return resp
+
     def get_price(self, symbol):
         url = "{}/v3/accounts/{}/pricing".format(self.base_url, self.account_id)
         try:
-            resp = self.session.get(url, params={"instruments": symbol}, timeout=10)
+            resp = self._get(url, params={"instruments": symbol}, timeout=10)
             data = resp.json()
             if resp.status_code != 200:
                 self._translate_error(resp.status_code, data, symbol)
@@ -133,7 +161,7 @@ class OandaBroker(BrokerInterface):
     def get_positions(self):
         url = "{}/v3/accounts/{}/openPositions".format(self.base_url, self.account_id)
         try:
-            resp = self.session.get(url, timeout=10)
+            resp = self._get(url, timeout=10)
             data = resp.json()
             if resp.status_code != 200:
                 self._translate_error(resp.status_code, data, None)
@@ -144,7 +172,7 @@ class OandaBroker(BrokerInterface):
     def get_account_info(self):
         url = "{}/v3/accounts/{}/summary".format(self.base_url, self.account_id)
         try:
-            resp = self.session.get(url, timeout=10)
+            resp = self._get(url, timeout=10)
             data = resp.json()
             if resp.status_code != 200:
                 self._translate_error(resp.status_code, data, None)
@@ -161,7 +189,7 @@ class OandaBroker(BrokerInterface):
     def cancel_order(self, order_id):
         url = "{}/v3/accounts/{}/orders/{}/cancel".format(self.base_url, self.account_id, order_id)
         try:
-            resp = self.session.put(url, timeout=10)
+            resp = self._put(url, timeout=10)
             data = resp.json()
             if resp.status_code != 200:
                 self._translate_error(resp.status_code, data, None)
@@ -176,7 +204,7 @@ class OandaBroker(BrokerInterface):
         url = "{}/v3/instruments/{}/candles".format(self.base_url, symbol)
         params = {"granularity": granularity, "count": limit, "price": "M"}  # M = midpoint
         try:
-            resp = self.session.get(url, params=params, timeout=10)
+            resp = self._get(url, params=params, timeout=10)
             data = resp.json()
             if resp.status_code != 200:
                 self._translate_error(resp.status_code, data, symbol)
@@ -230,7 +258,7 @@ class OandaBroker(BrokerInterface):
                 "count": _MAX_CANDLES_PER_REQUEST,
             }
             try:
-                resp = self.session.get(url, params=params, timeout=30)
+                resp = self._get(url, params=params, timeout=30)
                 data = resp.json()
                 if resp.status_code != 200:
                     self._translate_error(resp.status_code, data, symbol)
@@ -283,7 +311,7 @@ class OandaBroker(BrokerInterface):
         error_message = (data or {}).get("errorMessage", "") or ""
         combined = "{} {}".format(error_code, error_message).upper()
 
-        if "INSUFFICIENT_MARGIN" in combined or "INSUFFICIENT_AUTHORIZATION" in combined:
+        if "INSUFFICIENT_MARGIN" in combined:
             raise InsufficientFundsError("OANDA: insufficient margin for {}".format(symbol))
         if "MARKET_HALTED" in combined or "MARKET_CLOSED" in combined:
             raise MarketClosedError("OANDA: market closed for {}".format(symbol))

@@ -18,6 +18,7 @@ instead of importing brokers directly).
 import pytest
 
 from brokers.oanda_broker import OandaBroker
+from errors import BrokerConnectionError, InsufficientFundsError
 
 
 def _make_broker():
@@ -97,3 +98,109 @@ def test_session_retry_excludes_post_but_allows_get_and_put():
 def test_http_and_https_use_the_same_retrying_adapter():
     broker = _make_broker()
     assert broker.session.adapters["http://"].max_retries.total == 1
+
+
+# --- 401-specific retry (distinct from the connection/read-timeout retry
+# above -- these are real HTTP 401 responses OANDA itself sends, observed
+# in production to be intermittent and self-clearing) --------------------
+
+class _FakeResponse:
+    def __init__(self, status_code, body):
+        self.status_code = status_code
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+def test_get_retries_once_on_401_and_succeeds_on_the_retry(monkeypatch):
+    broker = _make_broker()
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            return _FakeResponse(401, {"errorMessage": "Insufficient authorization to perform request."})
+        return _FakeResponse(200, {"account": {"NAV": "10000", "marginAvailable": "9000", "unrealizedPL": "0"}})
+
+    monkeypatch.setattr(broker.session, "get", fake_get)
+    monkeypatch.setattr("brokers.oanda_broker.time.sleep", lambda s: None)
+
+    info = broker.get_account_info()
+
+    assert len(calls) == 2  # one failed attempt, one retry
+    assert info["equity"] == 10000.0
+
+
+def test_get_gives_up_after_one_retry_if_still_401(monkeypatch):
+    broker = _make_broker()
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(1)
+        return _FakeResponse(401, {"errorMessage": "Insufficient authorization to perform request."})
+
+    monkeypatch.setattr(broker.session, "get", fake_get)
+    monkeypatch.setattr("brokers.oanda_broker.time.sleep", lambda s: None)
+
+    with pytest.raises(BrokerConnectionError, match="401"):
+        broker.get_account_info()
+
+    assert len(calls) == 2  # exactly one retry, not a retry loop
+
+
+def test_put_also_retries_once_on_401(monkeypatch):
+    broker = _make_broker()
+    calls = []
+
+    def fake_put(url, timeout=None):
+        calls.append(1)
+        if len(calls) == 1:
+            return _FakeResponse(401, {"errorMessage": "Insufficient authorization to perform request."})
+        return _FakeResponse(200, {"status": "cancelled"})
+
+    monkeypatch.setattr(broker.session, "put", fake_put)
+    monkeypatch.setattr("brokers.oanda_broker.time.sleep", lambda s: None)
+
+    result = broker.cancel_order("123")
+
+    assert len(calls) == 2
+    assert result == {"status": "cancelled"}
+
+
+def test_place_order_never_retries_on_401_even_transiently(monkeypatch):
+    """The one call site that must NOT get the 401 retry: place_order
+    posts directly via self.session.post, bypassing _get/_put entirely
+    -- a request that already reached OANDA and placed an order must
+    never risk becoming a duplicate via a blind retry."""
+    broker = _make_broker()
+    calls = []
+
+    def fake_post(url, json=None, timeout=None):
+        calls.append(1)
+        return _FakeResponse(401, {"errorMessage": "Insufficient authorization to perform request."})
+
+    monkeypatch.setattr(broker.session, "post", fake_post)
+    monkeypatch.setattr("brokers.oanda_broker.time.sleep", lambda s: (_ for _ in ()).throw(AssertionError("place_order must never sleep/retry")))
+
+    with pytest.raises(BrokerConnectionError):
+        broker.place_order("GBP_JPY", "buy", 1000)
+
+    assert len(calls) == 1  # no retry at all
+
+
+# --- _translate_error: INSUFFICIENT_AUTHORIZATION must not be classified
+# as InsufficientFundsError (a "not enough money" rejection) -- that
+# silently skips the BrokerConnectionError handling in server.py that
+# actually alerts on broker errors (alerts.record_broker_error). -------
+
+def test_insufficient_authorization_is_a_connection_error_not_insufficient_funds():
+    broker = _make_broker()
+    with pytest.raises(BrokerConnectionError):
+        broker._translate_error(401, {"errorCode": "INSUFFICIENT_AUTHORIZATION"}, "GBP_JPY")
+
+
+def test_insufficient_margin_is_unaffected_by_the_authorization_fix():
+    broker = _make_broker()
+    with pytest.raises(InsufficientFundsError):
+        broker._translate_error(400, {"errorCode": "INSUFFICIENT_MARGIN"}, "GBP_JPY")
